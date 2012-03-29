@@ -570,7 +570,7 @@ LOOP
 
 
 -- Eliminate all n itemsets that has any n-m ( m<n) itemsets with insufficient support (Deconstruct the n itemset) 
-  EXECUTE 'SELECT assoc_svec_list_parts(''set_list '', '' list_b'', ''assoc_set_list_parts'')';
+  EXECUTE 'SELECT MADLIB_SCHEMA.assoc_svec_list_parts(''set_list '', '' list_b'', ''assoc_set_list_parts'')';
  
   EXECUTE 'DROP TABLE IF EXISTS list_c'; 
   EXECUTE 'CREATE TABLE list_c AS 
