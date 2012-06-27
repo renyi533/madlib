@@ -275,6 +275,20 @@ RETURNS FLOAT8[]
 AS 'MODULE_PATHNAME', 'dt_scv_aggr_sfunc'
 LANGUAGE C IMMUTABLE;
 
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__scv_aggr_sfunc_null
+    (
+    result              FLOAT8[],
+    split_criterion     INT,
+    feature_value       FLOAT8,
+    class               FLOAT8,
+    is_cont             boolean,
+    le                  FLOAT8,
+    gt                  FLOAT8,
+    true_total_count    FLOAT8
+    ) 
+RETURNS FLOAT8[]  
+AS 'MODULE_PATHNAME', 'dt_scv_aggr_sfunc_null'
+LANGUAGE C IMMUTABLE;
 
 /*
  * @brief The pre-function for the aggregation of splitting criteria values. It  
@@ -319,6 +333,14 @@ AS 'MODULE_PATHNAME', 'dt_scv_aggr_ffunc'
 LANGUAGE C STRICT IMMUTABLE;
 
 
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__scv_aggr_ffunc_null
+    (
+    internal_result     FLOAT8[]
+    ) 
+RETURNS FLOAT8[]
+AS 'MODULE_PATHNAME', 'dt_scv_aggr_ffunc_null'
+LANGUAGE C STRICT IMMUTABLE;
+
 DROP TYPE IF EXISTS MADLIB_SCHEMA.__scv_aggr_result CASCADE;
 CREATE TYPE MADLIB_SCHEMA.__scv_aggr_result AS
     (
@@ -356,6 +378,25 @@ AGGREGATE MADLIB_SCHEMA.__scv_aggr
   SFUNC=MADLIB_SCHEMA.__scv_aggr_sfunc,
   m4_ifdef(`__GREENPLUM__', m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `', ``prefunc=MADLIB_SCHEMA.__scv_aggr_prefunc,''))
   FINALFUNC=MADLIB_SCHEMA.__scv_aggr_ffunc,
+  STYPE=FLOAT8[],
+  initcond = '{0,0,0,0,0,0,0,0,0,0,0,0,0,0}'
+);
+
+CREATE
+ORDERED
+AGGREGATE MADLIB_SCHEMA.__scv_aggr_null
+    (
+    INT,
+    FLOAT8,
+    FLOAT8,
+    boolean,
+    FLOAT8,
+    FLOAT8,
+    FLOAT8
+    ) 
+(
+  SFUNC=MADLIB_SCHEMA.__scv_aggr_sfunc_null,
+  FINALFUNC=MADLIB_SCHEMA.__scv_aggr_ffunc_null,
   STYPE=FLOAT8[],
   initcond = '{0,0,0,0,0,0,0,0,0,0,0,0,0,0}'
 );
