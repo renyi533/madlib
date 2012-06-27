@@ -1213,6 +1213,22 @@ dt_scv_aggr_sfunc
 PG_FUNCTION_INFO_V1(dt_scv_aggr_sfunc);
 
 
+Datum
+dt_scv_aggr_sfunc_null
+	(
+	PG_FUNCTION_ARGS
+	)
+{
+    ArrayType*	scv_state_array	= NULL;
+    if (fcinfo->context && IsA(fcinfo->context, AggState))
+        scv_state_array = PG_GETARG_ARRAYTYPE_P(0);
+    else
+        scv_state_array = PG_GETARG_ARRAYTYPE_P_COPY(0);
+
+    PG_RETURN_ARRAYTYPE_P(scv_state_array);
+}
+PG_FUNCTION_INFO_V1(dt_scv_aggr_sfunc_null);
+
 /*
  * @brief The pre-function for the aggregation of splitting criteria values.
  *        It takes the state array produced by two sfunc and combine them together.
@@ -1542,6 +1558,30 @@ dt_scv_aggr_ffunc
 }
 PG_FUNCTION_INFO_V1(dt_scv_aggr_ffunc);
 
+
+Datum
+dt_scv_aggr_ffunc_null
+	(
+	PG_FUNCTION_ARGS
+	)
+{
+
+    int result_size	= 11;
+    float8 *result	= palloc0(sizeof(float8) * result_size);
+
+    ArrayType* result_array =
+        construct_array(
+            (Datum *)result,
+            result_size,
+            FLOAT8OID,
+            sizeof(float8),
+            true,
+            'd'
+            );
+
+    PG_RETURN_ARRAYTYPE_P(result_array);
+}
+PG_FUNCTION_INFO_V1(dt_scv_aggr_ffunc_null);
 
 /*
  * @brief The function samples a set of integer values between low and high.
