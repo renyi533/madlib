@@ -11,18 +11,21 @@ modules:
       depends: ['array_ops']
     - name: data_profile
       depends: ['sketch']
-#    - name: decision_tree
-#      depends: ['svec','array_ops']
+#    - name: cart
     - name: kmeans
       depends: ['array_ops','svec']
     - name: kernel_machines
       depends: ['svec']
+    - name: linalg
     - name: plda
     - name: prob
-    - name: quantile 
+    - name: quantile
     - name: regress
-      depends: ['array_ops']
     - name: sketch
+#    - name: stats
+#      depends: ['utilities']
     - name: svd_mf
     - name: svec
     - name: utilities
+      depends: ['linalg']
+#    - name: textfex_viterbi

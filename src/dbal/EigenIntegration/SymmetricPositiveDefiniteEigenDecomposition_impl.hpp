@@ -4,8 +4,14 @@
  *
  *//* ----------------------------------------------------------------------- */
 
-// Workaround for Doxygen: Ignore if not included by EigenLinAlgTypes.hpp
-#ifdef MADLIB_EIGEN_LINALGTYPES_HPP
+#ifndef MADLIB_DBAL_EIGEN_INTEGRATION_SPDEIGENDECOMPOSITION_IMPL_HPP
+#define MADLIB_DBAL_EIGEN_INTEGRATION_SPDEIGENDECOMPOSITION_IMPL_HPP
+
+namespace madlib {
+
+namespace dbal {
+
+namespace eigen_integration {
 
 /**
  * @brief Constructor that invokes the computation
@@ -18,46 +24,42 @@
  * @param inOptions A combination of DecompositionOptions
  * @param inExtras A combination of SPDDecompositionExtras
  */
-template <int MapOptions>
 template <class MatrixType>
 inline
-EigenTypes<MapOptions>
-    ::SymmetricPositiveDefiniteEigenDecomposition<MatrixType>
+SymmetricPositiveDefiniteEigenDecomposition<MatrixType>
     ::SymmetricPositiveDefiniteEigenDecomposition(
     const MatrixType &inMatrix, int inOptions, int inExtras)
   : Base(inMatrix, inOptions) {
-    
+
     computeExtras(inMatrix, inExtras);
 }
 
 /**
  * @brief Return the condition number of the matrix
- * 
+ *
  * In general, the condition number of a matrix is the absolute value of the
  * largest singular value divided by the smallest singular value. When a matrix
  * is symmetric positive semi-definite, all eigenvalues are also singular
  * values. Moreover, all eigenvalues are non-negative.
  */
-template <int MapOptions>
 template <class MatrixType>
 inline
 double
-EigenTypes<MapOptions>
-    ::SymmetricPositiveDefiniteEigenDecomposition<MatrixType>::conditionNo()
+SymmetricPositiveDefiniteEigenDecomposition<MatrixType>::conditionNo()
     const {
 
     const RealVectorType& ev = eigenvalues();
-    
+
     double numerator = ev(ev.size() - 1);
     double denominator = ev(0);
-    
+
     // All eigenvalues of a positive semi-definite matrix are
     // non-negative, so in theory no need to take absolute values.
     // Unfortunately, numerical instabilities can cause eigenvalues to
     // be slightly negative. We should interprete that as 0.
     if (denominator < 0)
         denominator = 0;
-    
+
     return numerator <= 0 ? std::numeric_limits<double>::infinity()
                           : numerator / denominator;
 }
@@ -68,14 +70,10 @@ EigenTypes<MapOptions>
  * The result of this function is undefined if computeExtras() has not been
  * called or the pseudo-inverse was not set to be computed.
  */
-template <int MapOptions>
 template <class MatrixType>
 inline
 const MatrixType&
-EigenTypes<MapOptions>
-    ::SymmetricPositiveDefiniteEigenDecomposition<MatrixType>::pseudoInverse()
-    const {
-    
+SymmetricPositiveDefiniteEigenDecomposition<MatrixType>::pseudoInverse() const {
     return mPinv;
 }
 
@@ -83,14 +81,14 @@ EigenTypes<MapOptions>
  * @brief Perform extra computations after the decomposition
  *
  * If the matrix has a condition number of less than 1000 (currently
- * this is hard-coded), it necessarily has full rank and is invertible. 
+ * this is hard-coded), it necessarily has full rank and is invertible.
  * The Moore-Penrose pseudo-inverse coincides with the inverse and we
  * compute it directly, using a \f$ L D L^T \f$ Cholesky decomposition.
  *
  * If the matrix has a condition number of more than 1000, we are on the
  * safe side and use the eigen decomposition for computing the
  * pseudo-inverse.
- * 
+ *
  * Since the eigenvectors of a symmtric positive semi-definite matrix
  * are orthogonal, and Eigen moreover scales them to have norm 1 (i.e.,
  * the eigenvectors returned by Eigen are orthonormal), the Eigen
@@ -109,14 +107,12 @@ EigenTypes<MapOptions>
  * Only the <b>lower triangular part</b> of the input matrix
  * is referenced.
  */
-template <int MapOptions>
 template <class MatrixType>
 inline
 void
-EigenTypes<MapOptions>
-    ::SymmetricPositiveDefiniteEigenDecomposition<MatrixType>::computeExtras(
+SymmetricPositiveDefiniteEigenDecomposition<MatrixType>::computeExtras(
     const MatrixType &inMatrix, int inExtras) {
-    
+
     if (inExtras & ComputePseudoInverse) {
         mPinv.resize(inMatrix.rows(), inMatrix.cols());
 
@@ -130,14 +126,14 @@ EigenTypes<MapOptions>
         } else {
             if (!Base::m_eigenvectorsOk)
                 Base::compute(inMatrix, Eigen::ComputeEigenvectors);
-            
+
             const RealVectorType& ev = eigenvalues();
-            
+
             // The eigenvalue are sorted in increasing order
-            Scalar epsilon = inMatrix.rows()
+            Scalar epsilon = static_cast<double>(inMatrix.rows())
                            * ev(ev.size() - 1)
                            * std::numeric_limits<Scalar>::epsilon();
-            
+
             RealVectorType eigenvectorsInverted(ev.size());
             for (Index i = 0; i < static_cast<Index>(ev.size()); ++i) {
                 eigenvectorsInverted(i) = ev(i) < epsilon
@@ -148,7 +144,13 @@ EigenTypes<MapOptions>
                   * eigenvectorsInverted.asDiagonal()
                   * Base::eigenvectors().transpose();
         }
-    }            
+    }
 }
 
-#endif // MADLIB_EIGEN_LINALGTYPES_HPP (workaround for Doxygen)
+} // namespace eigen_integration
+
+} // namespace dbal
+
+} // namespace madlib
+
+#endif // defined(MADLIB_DBAL_EIGEN_INTEGRATION_SPDEIGENDECOMPOSITION_IMPL_HPP)
