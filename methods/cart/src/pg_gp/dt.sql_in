@@ -1310,9 +1310,20 @@ DECLARE
     begin_func_exec    TIMESTAMP;
     best_answer        FLOAT8[];
     select_stmt		   TEXT;
+	explain_text       TEXT;
+	begin_exec		   TIMESTAMP;
+    pre_time		   INTERVAL;
+	scv_time		   INTERVAL;
+	pst_time		   INTERVAL;
+	is_first		   BOOL := 't'::BOOL;
 BEGIN    
     begin_func_exec = clock_timestamp();
-    
+    begin_exec = clock_timestamp();
+	pre_time = begin_exec - begin_exec;
+	scv_time = pre_time;
+	pst_time = pre_time;
+
+
     IF (h2hmv_routine_id=1) THEN
         -- For ignore, we need the true size of nodes to handle the missing values.
         TRUNCATE node_size_aux;
@@ -1424,11 +1435,22 @@ m4_ifdef(>>>__HAS_ORDERED_AGGREGATES__<<<, >>>
     INTO curstmt;   
 <<<)
 m4_changequote(>>>`<<<, >>>'<<<)
-    
+
+    RAISE INFO '%', curstmt;
+
+    pre_time = clock_timestamp() - begin_exec;
+	begin_exec = clock_timestamp();
+
+    EXECUTE 'DROP TABLE IF EXISTS tmp_best';
+	EXECUTE 'CREATE TEMP TABLE tmp_best AS ' || curstmt;
+    scv_time = clock_timestamp() - begin_exec;
+
+    begin_exec = clock_timestamp();
+
     -- s1.info_impurity[1], s1.fid[2], s1.split_value[3], 
     -- s2.class_prob[4], s2.class_id[5], s1.total_size[6]
-    FOR result_rec IN EXECUTE (curstmt) LOOP
-        result.tid                  = result_rec.tid;
+    FOR result_rec IN EXECUTE ('SELECT * from tmp_best') LOOP
+	    result.tid                  = result_rec.tid;
         result.node_id              = result_rec.nid;
         best_answer                 = result_rec.info;
         result.feature              = best_answer[2];
@@ -1488,6 +1510,10 @@ m4_changequote(>>>`<<<, >>>'<<<)
         EXECUTE curstmt;
     END LOOP;
         
+	pst_time = clock_timestamp() - begin_exec;
+
+    RAISE INFO 'SCV calcuation: pretime, %, scv_time, %, psttime, %', pre_time, scv_time, pst_time;
+
     RETURN;
 END
 $$ LANGUAGE PLPGSQL;
@@ -1535,7 +1561,10 @@ BEGIN
         nid            INT,
         tid            INT
     ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (fid, fval)');
-
+	DROP TABLE IF EXISTS training_instance_copy;
+                 CREATE TABLE training_instance_copy AS 
+				                  SELECT *, 0 as tree_depth, '00:00:00'::INTERVAL as acs_time 
+								                   FROM training_instance;
 
     --  The table of training_instance_temp is of the same structure
     --  as table above. It is used when we need modify the training_instance
@@ -2323,17 +2352,11 @@ m4_changequote(>>>`<<<, >>>'<<<)
         calc_olap_time = calc_olap_time + (clock_timestamp() - begin_olap_acs);
 
         -- If you want to keep the ACS set, please uncomment the following code.
-        -- IF (verbosity > 0) THEN
-        --     IF (NOT MADLIB_SCHEMA.__table_exists('training_instance_copy')) THEN
-        --         CREATE TABLE training_instance_copy AS 
-        --         SELECT *, (curr_level) as tree_depth, calc_olap_time as acs_time 
-        --         FROM training_instance;
-        --     ELSE
-        --         INSERT INTO training_instance_copy
-        --         SELECT *, (curr_level) as tree_depth, calc_olap_time as 
-        --         acs_time FROM training_instance;
-        --    END IF;    
-        -- END IF;
+         IF (verbosity > 0) THEN
+                 INSERT INTO training_instance_copy
+                 SELECT *, (curr_level) as tree_depth, calc_olap_time as 
+                 acs_time FROM training_instance;
+         END IF;
         
         curr_level = curr_level + 1;
         
