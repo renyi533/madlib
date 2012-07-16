@@ -652,7 +652,6 @@ BEGIN
                     node_prune_threshold,
                     node_split_threshold,
                     'f',
-                    0,
                     h2hmv_routine_id,
                     verbosity
                 );
@@ -1285,13 +1284,12 @@ BEGIN
    -- translate the encoded class information back
     curstmt = MADLIB_SCHEMA.__format
                 (
-                    'CREATE TABLE % AS SELECT n.id, m.% as class, n.prob 
+                    'CREATE TABLE % AS SELECT n.id, m.fval as class, n.prob 
                      From % n, % m 
-                     WHERE n.class = m.key 
+                     WHERE n.class = m.code 
                      m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)');',
                     ARRAY[
                         result_table_name,
-                        result_rec.column_name,
                         temp_result_table,
                         result_rec.table_name
                     ]

@@ -18,34 +18,13 @@
  * @note Greenplum doesn't support boolean to text casting.
  *
  */
-DROP FUNCTION IF EXISTS MADLIB_SCHEMA.__to_char
-    (
-    val anyelement
-    );
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__to_char
     (
     val anyelement
-    )
-RETURNS TEXT AS $$
-DECLARE
-    is_bool BOOLEAN;
-BEGIN
-    IF (val is NULL) THEN
-        return 'null'::text;
-    END IF;
-    SELECT pg_typeof(val) = 'boolean'::regtype INTO is_bool;
-    IF (is_bool) THEN
-         IF (val::boolean) THEN
-            RETURN 'true';
-         ELSE
-            RETURN 'false';
-         END IF;
-    END IF;
-    
-    RETURN val::TEXT;
-
-END
-$$ LANGUAGE PLPGSQL;
+    ) 
+RETURNS TEXT
+AS 'MODULE_PATHNAME', 'dt_to_text'
+LANGUAGE C STRICT IMMUTABLE;
 
 
 /*
@@ -528,3 +507,18 @@ BEGIN
     RETURN ret;
 END
 $$ LANGUAGE PLPGSQL;
+
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__array_in
+	(
+	arr1 ANYARRAY, 
+	arr2 ANYARRAY
+	)
+RETURNS BOOLEAN[] AS $$
+	SELECT array_agg(elem in (SELECT unnest($1)))
+	FROM 
+		(
+		SELECT unnest($2) as elem
+		) t 
+$$ LANGUAGE sql STABLE;
+

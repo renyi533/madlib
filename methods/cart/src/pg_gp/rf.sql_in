@@ -99,7 +99,6 @@ that it does not need a class column.
     '<em>max_tree_depth</em>',
     '<em>node_prune_threshold</em>',
     '<em>node_split_threshold</em>',
-    '<em>max_split_point</em>',    
     '<em>verbosity</em>');
   </pre>
   This will create the decision tree output table storing an abstract object
@@ -460,17 +459,6 @@ CREATE TYPE MADLIB_SCHEMA.rf_classify_result AS
  *        which defines a set of features, an ID, and a labeled class. Features 
  *        could be either discrete or continuous. All the DTs of the result RF 
  *        will be kept in a single table. 
- *        For continuous features, each possible value could be used as a potential 
- *        split point for entropy/gini computation. If the number of distinct values 
- *        is large, the computation could be very costly. Users can specify the maximum
- *        split points with the parameter of 'max_split_point'. If the specified value
- *        is a positive number, we use equal-freqency algorithm to discretize the  
- *        continuous features. The discretization process is as follows:
- *        1) We determine the minimum and maximum values of a continuous feature. 
- *        2) We sort all values in ascending order and divides the range into K  
- *        intervals so that each interval contains the same number of sorted values.
- *        3) We only consider the values in the intervals' boundaries as potential
- *        split points.
  *
  * We discretize continuous features on local regions during training rather 
  * than discretizing on the whole dataset prior to training because local 
@@ -529,9 +517,6 @@ CREATE TYPE MADLIB_SCHEMA.rf_classify_result AS
  *                                  trained tree only has two levels, since only the root node will grow.
  *                                  (the root node);
  *                                  if its value is 0, then trees can grow extensively.
- * @param max_split_point           The upper limit of sampled split points for continuous 
- *                                  features. If it's NULL or zero, all the distinct values of the
- *                                  features will be used as split values.
  * @param verbosity                 > 0 means this function runs in verbose mode. 
  *                                  It can't be NULL.
  *
@@ -554,7 +539,6 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.rf_train
     max_tree_depth              INT,
     node_prune_threshold        FLOAT,
     node_split_threshold        FLOAT, 
-    max_split_point             INT,
     verbosity                   INT
     ) 
 RETURNS MADLIB_SCHEMA.rf_train_result AS $$
@@ -597,13 +581,6 @@ BEGIN
                 how2handle_missing_value = 'explicit',
                 'how2handle_missing_value must be ignore or explicit!'
             );    
-
-    PERFORM MADLIB_SCHEMA.__assert
-            (
-				max_split_point IS NULL				OR
-				max_split_point >= 0,
-                'max_split_point value must be greater than or equal to 0'
-            );
 
     PERFORM MADLIB_SCHEMA.__assert
             (
@@ -861,7 +838,6 @@ BEGIN
                     node_prune_threshold,
                     node_split_threshold,
                     't',
-                    max_split_point,
                     h2hmv_routine_id,
                     verbosity
                 );
@@ -1218,9 +1194,9 @@ BEGIN
     EXECUTE curstmt INTO result_rec;
             
    -- translate the encoded class information back
-    EXECUTE 'CREATE TABLE '||result_table_name||' AS SELECT n.id, m.'||
-        result_rec.column_name||' as class,n.prob from '||vote_result_table||
-        ' n,'||result_rec.table_name||' m where n.class=m.key 
+    EXECUTE 'CREATE TABLE '||result_table_name||' AS SELECT n.id, 
+             m.fval as class,n.prob from '||vote_result_table||
+        ' n,'||result_rec.table_name||' m where n.class=m.code 
         m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)');';
         
     EXECUTE 'DROP TABLE IF EXISTS ' || encoded_table_name || ';';

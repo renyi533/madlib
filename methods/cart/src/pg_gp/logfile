@@ -1,0 +1,40 @@
+LOG:  database system was shut down at 2012-07-11 15:12:01 CST
+LOG:  database system is ready to accept connections
+LOG:  autovacuum launcher started
+ERROR:  schema "madlib" does not exist
+STATEMENT:  set CLIENT_MIN_MESSAGES=error; CREATE TABLE madlib.__madlib_test_table (A INT);
+ERROR:  syntax error at or near "END" at character 704
+STATEMENT:  /*
+	 * @brief Convert the class count array to a UDT.
+	 *
+	 * @param internal_result     The array containing all the information for the
+	 *                            calculation result of Reduced-Error pruning. 
+	 *                    
+	 * @return A two elements UDT.
+	 *
+	 */
+	CREATE OR REPLACE FUNCTION madlib.__rep_aggr_class_count_wrapper
+	    (
+	    internal_result BIGINT[]
+	    ) 
+	RETURNS madlib.__rep_result AS $$
+	DECLARE
+	    result madlib.__rep_result;
+	BEGIN
+	    IF(internal_result IS NOT NULL) THEN
+	       result.max_class  = internal_result[1];
+	       result.is_replace = internal_result[2];        
+	    ELSE
+	       result.max_class  = -1;
+	       result.is_replace = -1;
+	    END IF;
+	    RETURN result
+	END
+	$$ LANGUAGE PLPGSQL;
+ERROR:  schema "madlib" does not exist
+STATEMENT:  set CLIENT_MIN_MESSAGES=error; CREATE TABLE madlib.__madlib_test_table (A INT);
+LOG:  received smart shutdown request
+LOG:  autovacuum launcher shutting down
+FATAL:  terminating autovacuum process due to administrator command
+LOG:  shutting down
+LOG:  database system is shut down

@@ -237,58 +237,88 @@ END
 $$ LANGUAGE PLPGSQL;
 
 
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__best_scv_sfunc
+    (
+    result      FLOAT8[],    -- intermediate result
+    scv         FLOAT8[],
+    fid         INT,
+    split_value FLOAT8
+    ) 
+RETURNS FLOAT8[]  
+AS 'MODULE_PATHNAME', 'dt_best_scv_sfunc'
+LANGUAGE C STRICT IMMUTABLE;
+
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__best_scv_prefunc
+    (
+    sfunc1_result     FLOAT8[],
+    sfunc2_result     FLOAT8[]
+    ) 
+RETURNS FLOAT8[]
+AS 'MODULE_PATHNAME', 'dt_best_scv_prefunc'
+LANGUAGE C STRICT IMMUTABLE;
+
+
+DROP AGGREGATE IF EXISTS MADLIB_SCHEMA.__best_scv_aggr
+    (
+    FLOAT8[],       -- scv
+    INT,            -- fid
+    FLOAT8          -- split_value    
+    ) CASCADE;
+CREATE
+AGGREGATE MADLIB_SCHEMA.__best_scv_aggr
+    (
+    FLOAT8[],       -- scv
+    INT,            -- fid
+    FLOAT8          -- split_value
+    ) 
+(
+  SFUNC=MADLIB_SCHEMA.__best_scv_sfunc,
+  m4_ifdef(`__GREENPLUM__', `prefunc=MADLIB_SCHEMA.__best_scv_prefunc,')
+  STYPE=FLOAT8[],
+  initcond = '{0, 0, 0, 0, 0, 0, 0}'
+);
+
+
 /*
- * @brief The step function for the aggregation of splitting criteria values. 
- *        It accumulates all the information for scv calculation and stores 
- *        to a fourteen element array.
+ * @brief The step function is defined to process each record in the ACS set. 
+ *        The records have this format: 
+ *        {fid, fval, is_cont, split_value, le, total, tid, nid}
  *
- * @param result            The array used to accumulate all the information for the
- *                          calculation of splitting criteria values. Please refer to
- *                          the definition of SCV_STATE_ARRAY_INDEX.
- * @param split_criterion   1- infogain; 2- gainratio; 3- gini.
- * @param feature_value     The feature value of current record under processing.
- * @param class             The class of current record under processing.
- * @param is_cont           True- The feature is continuous. False- The feature is
- *                          discrete.
- * @param le                The count of elements less than or equal to feature_val.
- * @param gt                The count of elements greater than feature_val.
- * @param true_total_count  If there is any missing value, true_total_count is larger than
- *                          the total count computed in the aggregation. Thus, we should  
- *                          multiply a ratio for the computed gain. 
- *                    
- * @return A fourteen element array. Please refer to the definition of 
- *         SCV_STATE_ARRAY_INDEX for the detailed information of this
- *         array.
+ * @param result            The array used to keep the best attribute's info.
+ * @param sc_code           The code of the split criterion.
+ * @param is_cont           True  - The feature is continuous. 
+ *                          False - The feature is discrete.
+ * @param num_class         The total number of classes.
+ * @param le_array          The le component of the ACS record. le_array[i] is the 
+ *                          number of samples whose class code equals to i and 
+ *                          whose fval is less-than or equal to the fval component 
+ *                          of the ACS record being processed.
+ * @param total_array       The total component of the ACS record. total_array[i] is
+ *                          the number of samples whose class code equals to i.
+ * @param true_total        The real total number of samples currently assigned to 
+ *                          the node identified by (tid, nid). If there are missing
+ *                          values in fval, the sum of all elements in total_array
+ *                          will be less than true_total.
+ *
+ * @return A 9-element array. Please refer to the definition of SCV_STATE_ARRAY_INDEX
+ *         in dt.c for the detailed information of this array.
+ *
  */
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__scv_aggr_sfunc
     (
-    result              FLOAT8[],
-    split_criterion     INT,
-    feature_value       FLOAT8,
-    class               FLOAT8,
-    is_cont             boolean,
-    le                  FLOAT8,
-    gt                  FLOAT8,
-    true_total_count    FLOAT8
-    ) 
-RETURNS FLOAT8[]  
+    result          FLOAT8[],
+    sc_code         INT,
+    is_cont         BOOLEAN,
+    num_class       INT,
+    le_array        FLOAT8[],
+    total_array     FLOAT8[],
+    true_total      BIGINT
+    )
+RETURNS FLOAT8[]
 AS 'MODULE_PATHNAME', 'dt_scv_aggr_sfunc'
 LANGUAGE C IMMUTABLE;
 
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__scv_aggr_sfunc_null
-    (
-    result              FLOAT8[],
-    split_criterion     INT,
-    feature_value       FLOAT8,
-    class               FLOAT8,
-    is_cont             boolean,
-    le                  FLOAT8,
-    gt                  FLOAT8,
-    true_total_count    FLOAT8
-    ) 
-RETURNS FLOAT8[]  
-AS 'MODULE_PATHNAME', 'dt_scv_aggr_sfunc_null'
-LANGUAGE C IMMUTABLE;
 
 /*
  * @brief The pre-function for the aggregation of splitting criteria values. It  
@@ -296,10 +326,10 @@ LANGUAGE C IMMUTABLE;
  *
  * @param sfunc1_result     The array from sfunc1.
  * @param sfunc2_result     The array from sfunc2.
- *                    
- * @return A fourteen element array. Please refer to the definition of 
- *         SCV_STATE_ARRAY_INDEX for the detailed information of this
- *         array.
+ *
+ * @return A 9-element array. Please refer to the definition of SCV_STATE_ARRAY_INDEX
+ *         in dt.c for the detailed information of this array.
+ *
  */
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__scv_aggr_prefunc
     (
@@ -312,16 +342,14 @@ LANGUAGE C STRICT IMMUTABLE;
 
 
 /*
- * @brief The final function for the aggregation of splitting criteria values.  
- *        It takes the state array produced by the sfunc and produces an 
- *        eleven-element array.
+ * @brief The final function for the aggregation of splitting criteria values.
+ *        It takes the state array produced by the sfunc and produces a
+ *        5-element array.
  *
- * @param internal_result   The array containing all the information for the
- *                          calculation of splitting criteria values.
- *                    
- * @return A eleven element array. Please refer to the definition of 
- *         SCV_FINAL_ARRAY_INDEX for the detailed information of this
- *         array.
+ * @param internal_result   The 9-element array produced by dt_scv_aggr_prefunc
+ *
+ * @return A 5-element array. Please refer to the definition of SCV_FINAL_ARRAY_INDEX
+ *         in dt.c for the detailed information of this array.
  *
  */
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__scv_aggr_ffunc
@@ -333,376 +361,66 @@ AS 'MODULE_PATHNAME', 'dt_scv_aggr_ffunc'
 LANGUAGE C STRICT IMMUTABLE;
 
 
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__scv_aggr_ffunc_null
-    (
-    internal_result     FLOAT8[]
-    ) 
-RETURNS FLOAT8[]
-AS 'MODULE_PATHNAME', 'dt_scv_aggr_ffunc_null'
-LANGUAGE C STRICT IMMUTABLE;
-
-DROP TYPE IF EXISTS MADLIB_SCHEMA.__scv_aggr_result CASCADE;
-CREATE TYPE MADLIB_SCHEMA.__scv_aggr_result AS
-    (
-    info_impurity       FLOAT8,
-    class_prob          FLOAT8,
-    class_id            INT,
-    total_size          FLOAT8,
-    is_cont             BOOLEAN
-    );
-
-
 DROP AGGREGATE IF EXISTS MADLIB_SCHEMA.__scv_aggr
     (
-    INT,
-    FLOAT8,
-    FLOAT8,
-    boolean,
-    FLOAT8,
-    FLOAT8,
-    FLOAT8
+    INT,        -- sc
+    BOOLEAN,    -- is_cont
+    INT,        -- total number of classes
+    FLOAT8[],   -- le array
+    FLOAT8[],   -- total count array
+    BIGINT      -- the total number of samples
     ) CASCADE;
 CREATE
-m4_ifdef(`__GREENPLUM__', m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `ORDERED'))
 AGGREGATE MADLIB_SCHEMA.__scv_aggr
     (
-    INT,
-    FLOAT8,
-    FLOAT8,
-    boolean,
-    FLOAT8,
-    FLOAT8,
-    FLOAT8
+    INT,        -- sc
+    BOOLEAN,    -- is_cont
+    INT,        -- total number of classes
+    FLOAT8[],   -- le array
+    FLOAT8[],   -- total count array
+    BIGINT      -- the total number of samples
     ) 
 (
   SFUNC=MADLIB_SCHEMA.__scv_aggr_sfunc,
-  m4_ifdef(`__GREENPLUM__', m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `', ``prefunc=MADLIB_SCHEMA.__scv_aggr_prefunc,''))
+  m4_ifdef(`__GREENPLUM__', `prefunc=MADLIB_SCHEMA.__scv_aggr_prefunc,')
   FINALFUNC=MADLIB_SCHEMA.__scv_aggr_ffunc,
   STYPE=FLOAT8[],
-  initcond = '{0,0,0,0,0,0,0,0,0,0,0,0,0,0}'
-);
-
-CREATE
-ORDERED
-AGGREGATE MADLIB_SCHEMA.__scv_aggr_null
-    (
-    INT,
-    FLOAT8,
-    FLOAT8,
-    boolean,
-    FLOAT8,
-    FLOAT8,
-    FLOAT8
-    ) 
-(
-  SFUNC=MADLIB_SCHEMA.__scv_aggr_sfunc_null,
-  FINALFUNC=MADLIB_SCHEMA.__scv_aggr_ffunc_null,
-  STYPE=FLOAT8[],
-  initcond = '{0,0,0,0,0,0,0,0,0,0,0,0,0,0}'
+  initcond = '{0, 0, 0, 0, 0, 0, 0, 0, 0}'
+  -- 1   sc: 1 infogain, 2 gainratio, 3 gini
+  -- 2   is_cont
+  -- 3   scv_class_info
+  -- 4   scv_attr_info
+  -- 5   scv_class_attr_info
+  -- 6   scv_count
+  -- 7   scv_total
+  -- 8   max_class_id
+  -- 9   max_class_count
 );
 
 
 /*
- * @brief This function acts as an adapter. It transforms the result of  
- *        scv_aggr to a more friendly format. So other modules can use 
- *        conveniently.
+ * @brief Retrieve the specified number of unique features for a node.
+ *        Discrete features used by ancestor nodes will be excluded.
+ *        If the number of remaining features is less or equal than the
+ *        requested number of features, then all the remaining features
+ *        will be returned. Otherwise, we will sample the requested 
+ *        number of features from the remaining features.
  *
- * @param internal_result   The array containing all the information for the
- *                          calculation result of splitting criteria values.
- *                    
- * @return An object of the type of MADLIB_SCHEMA.__scv_aggr_result.
+ * @param num_req_features  The number of requested features.
+ * @param num_features      The total number of features.
+ * @param nid               The ID of the node for which the
+ *                          features are sampled.
+ * @param dp_fids           The IDs of the discrete features
+ *                          used by the ancestors.
  *
- */
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__scv_aggr_wrapper(
-    internal_result FLOAT8[]
-    )
-RETURNS MADLIB_SCHEMA.__scv_aggr_result AS $$
-DECLARE
-    result              MADLIB_SCHEMA.__scv_aggr_result;
-    split_criterion     INT;
-    calc_pre_split      INT;
-    is_cont             INT;
-BEGIN
-    split_criterion = internal_result[4];
-    is_cont = internal_result[8];
-
-    IF ( split_criterion = 1 ) THEN
-        result.info_impurity = internal_result[5];
-    ELSIF( split_criterion = 2 ) THEN
-        result.info_impurity = internal_result[6];
-    ELSE
-        result.info_impurity = internal_result[7];
-    END IF;
-    
-    result.class_id   = internal_result[9];
-    result.class_prob = internal_result[10];
-    result.total_size = internal_result[11];
-    
-    IF ((NOT result.total_size>0) OR
-            result.class_prob<0 OR 
-            result.class_prob>1) THEN
-        RAISE EXCEPTION 'total_size is %,class_prob is %', 
-            result.total_size,result.class_prob;
-    END IF;
-
-    IF (is_cont>0) THEN
-        result.is_cont = 't';
-    ELSE
-        result.is_cont = 'f';
-    END IF;
-    RETURN result;
-END 
-$$ LANGUAGE PLPGSQL;
-
-
-/*
- * Attribute info type
- *
- * fid      The ID of the feature.
- * fval     A value of the feature.
- * is_cont  Is the feature continuous or not.
+ * @return An array containing all the IDs of chosen features.
  *
  */
-DROP TYPE IF EXISTS MADLIB_SCHEMA.__attr_info;
-CREATE TYPE MADLIB_SCHEMA.__attr_info AS
-    (
-    fid      INT,
-    fval     FLOAT8,
-    is_cont  BOOLEAN
-    );
-
-
-/*
- * @brief Customized coalesce function.
- *
- * @param lhs   The first attribute info type.
- * @param rhs   The second attribute info type.
- *                    
- * @return An object of the type of MADLIB_SCHEMA.__attr_info.
- *
- */
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__tfc
-    (
-    lhs     MADLIB_SCHEMA.__attr_info,
-    rhs     MADLIB_SCHEMA.__attr_info
-    )  
-RETURNS MADLIB_SCHEMA.__attr_info AS $$
-DECLARE
-BEGIN
-    IF (lhs.fval IS NULL) THEN
-        RETURN rhs;
-    END IF;
-    
-    RETURN lhs;
-END
-$$ LANGUAGE PLPGSQL;
-
-
-/*
- * @brief Generate the training instances (ACS set) for current leaf nodes based
- *        on the ACC table specified in parameter acc_table_name. 
- *
- * @param instance_table_name   The output table name, which contains the ACS set
- *                              for current leaf nodes.
- * @param class_table_name      The name of the class table.
- * @param acc_table_name        The name of the table containing ACC set.
- * @param max_split_point       The upper limit of sampled split points for 
- *                              continuous features. 
- * @param verbosity             > 0 means this function runs in verbose mode.
- *                    
- */
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__create_training_instance
-    (
-    instance_table_name         TEXT,
-    class_table_name            TEXT,
-    acc_table_name              TEXT,
-    max_split_point             INT,
-    verbosity                   INT
-    )
-RETURNS void AS $$
-DECLARE
-    curstmt             TEXT := '';
-    window_func_stmt    TEXT := '';
-    temp_table_name     TEXT := 'training_instance_temp';
-BEGIN
-    IF (coalesce(max_split_point,0)<1) THEN
-        temp_table_name=instance_table_name;
-    END IF;
-
-    EXECUTE 'TRUNCATE '||temp_table_name;
-m4_changequote(`>>>', `<<<')
-m4_ifdef(>>>__POSTGRESQL_PRE_9_0__<<<, >>>
-    -- old db version does not support starting from 1 following/curr row.
-    window_func_stmt = 
-            'CASE WHEN (is_cont) THEN 
-                    sum(count) OVER 
-                        (
-                        PARTITION BY tid,nid,class,fid ORDER BY fval 
-                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                        ) 
-                    ELSE 
-                        count 
-                    END AS le, 
-            CASE WHEN (is_cont) THEN
-            -- Any operation with NULL returns NULL.
-            -- We need convert NULL to 0 before minus operation.
-                    coalesce(
-                      sum(count) OVER
-                        ( 
-                        PARTITION BY tid,nid,class,fid ORDER BY fval 
-                        ROWS BETWEEN UNBOUNDED PRECEDING AND  UNBOUNDED FOLLOWING),
-                      0)
-                    -
-                    coalesce(
-                      sum(count) OVER 
-                        (
-                        PARTITION BY tid,nid,class,fid ORDER BY fval 
-                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                        ),
-                      0)
-                    ELSE 
-                        NULL 
-                    END AS gt,';
-<<<, >>>
-    window_func_stmt = 
-            'CASE WHEN (is_cont) THEN 
-                    sum(count) OVER 
-                        (
-                        PARTITION BY tid, nid,class,fid ORDER BY fval 
-                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                        ) 
-                    ELSE 
-                        count 
-                    END AS le, 
-            CASE WHEN (is_cont) THEN 
-                    sum(count) OVER
-                        ( 
-                        PARTITION BY tid, nid,class,fid ORDER BY fval 
-                        ROWS BETWEEN 1 FOLLOWING AND  UNBOUNDED FOLLOWING) 
-                    ELSE 
-                        NULL 
-                    END AS gt,';
-<<<)
-m4_changequote(>>>`<<<, >>>'<<<)
-
-    SELECT MADLIB_SCHEMA.__format
-        (
-            'INSERT INTO %(fid, fval, class, is_cont, split_value, le, gt, nid, tid)  
-            SELECT fid, fval, class, is_cont,
-                CASE WHEN (is_cont) THEN 
-                        fval::float8 
-                    ELSE 
-                        NULL 
-                    END AS split_value, 
-                %
-                nid,
-                tid
-            FROM (
-                SELECT DISTINCT n1.fid, n1.fval, n1.is_cont, n1.class, n2.count, n1.nid, n1.tid 
-                FROM 
-                    (
-                    SELECT fid, fval, is_cont, key as class, count, nid , tid
-                    FROM 
-                        (
-                        SELECT DISTINCT fval, count, fid, is_cont, nid, tid
-                        FROM %
-                        ) AS t1
-                    CROSS JOIN
-                    (
-                        SELECT key FROM %
-                    ) as t2
-                ) AS n1 
-                LEFT JOIN % n2   
-                ON coalesce(n2.class,0) = coalesce(n1.class,0) AND
-                   coalesce(n2.tid,0) = coalesce(n1.tid,0)     AND
-                   coalesce(n2.nid,0) = coalesce(n1.nid,0)     AND
-                   coalesce(n2.fid,0)= coalesce (n1.fid,0)     AND
-                   coalesce(n2.fval,0) = coalesce(n1.fval,0)  
-            ) t;',
-            ARRAY[
-                temp_table_name,
-                window_func_stmt,
-                acc_table_name,
-                class_table_name,
-                acc_table_name 
-            ]
-        ) INTO curstmt;
-
-    IF(verbosity > 0) THEN
-        RAISE INFO 'window function stmt: %', curstmt;
-    END IF;
-            
-    EXECUTE curstmt;
-
-    SELECT MADLIB_SCHEMA.__format
-        (
-            'INSERT INTO %(fid, fval, class, le, gt, nid, tid)  
-             SELECT fid, null, class, sum(le), null, nid, tid 
-             FROM % 
-             WHERE not is_cont group by fid, class, nid, tid;',
-            temp_table_name,
-            temp_table_name
-        ) INTO curstmt;
-
-    EXECUTE curstmt;     
-
-    IF (coalesce(max_split_point,0)>=1) THEN
-        -- We used two inserts rather than one insert to use the hash join.
-        -- If we add those conditions in the second insert to the first one,
-        -- gpdb will use nested loop join instead.
-        SELECT MADLIB_SCHEMA.__format
-            (
-                E'INSERT INTO %  
-                 SELECT t.* FROM % t
-                    INNER JOIN
-                    (SELECT l.tid, l.nid, l.fid,
-                            l.fval 
-                     FROM 
-                        (SELECT tid,nid,fid,fval,
-                            row_number() over
-                                (PARTITION BY tid,nid,fid 
-                                ORDER BY fval desc) as desc_row_num
-                         FROM % 
-                         WHERE class is NULL AND is_cont 
-                        ) l,
-                        (SELECT tid,nid,fid,
-                             count(fval)::FLOAT8 as num_dist_val
-                         FROM % 
-                         WHERE class is NULL AND is_cont
-                         GROUP BY tid,nid,fid) m 
-                     WHERE l.tid=m.tid AND l.nid=m.nid AND l.fid=m.fid 
-                       AND l.desc_row_num\\%ceil(m.num_dist_val/(%+1))::BIGINT=0
-                     ) k
-                ON 
-                (t.tid=k.tid AND t.nid=k.nid AND 
-                 t.fid=k.fid AND t.fval=k.fval);',
-                ARRAY[
-                    instance_table_name,
-                    temp_table_name,
-                    temp_table_name,
-                    temp_table_name,
-                    max_split_point::TEXT
-                ]
-            ) INTO curstmt;
-        EXECUTE curstmt;
-        
-        IF(verbosity > 0) THEN
-            RAISE INFO 'stmt: %', curstmt;
-        END IF;    
-        
-        SELECT MADLIB_SCHEMA.__format
-            (
-                'INSERT INTO %  
-                 SELECT * FROM % 
-                 WHERE (NOT is_cont) OR (is_cont IS NULL);',
-                instance_table_name,
-                temp_table_name
-            ) INTO curstmt;
-        EXECUTE curstmt;
-    
-    END IF;
-END
-$$ LANGUAGE PLPGSQL;
+CREATE OR REPLACE FUNCTION 
+MADLIB_SCHEMA.__dt_get_node_split_fids(INT4, INT4, INT4, INT4[])
+RETURNS INT[]
+AS 'MODULE_PATHNAME', 'dt_get_node_split_fids'
+LANGUAGE C VOLATILE;
 
 
 /*
@@ -772,7 +490,7 @@ BEGIN
      
      EXECUTE curstmt;
      
-     -- create index on tid and nid for faster searching
+     -- create index on nid for faster searching
      EXECUTE 'CREATE INDEX sf_association_index_nid ON sf_association (nid)';
 
      -- we return an constant string for the association table name
@@ -783,213 +501,22 @@ $$ LANGUAGE PLPGSQL;
 
 
 /*
- * @brief Construct the SQL statement which is used to generate the ACC set 
- *        for class.
- *
- * @param ed_name    The full name of the encoded table.
- * @param sup_olap   Whether the database supports olap extensions or not.
- *                    
- * @return The SQL statement which is used to generate the ACC set.
- *
- */
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__construct_grouping_stmt_by_class
-    (
-    ed_name     TEXT,
-    sup_olap    BOOL  
-    ) 
-RETURNS TEXT AS $$
-DECLARE
-BEGIN
-    IF (sup_olap) THEN
-        RETURN MADLIB_SCHEMA.__format
-                (
-                    'INSERT INTO training_instance_aux 
-                     SELECT ((null, null::FLOAT8, null::BOOL
-                             )::MADLIB_SCHEMA.__attr_info).*,
-                            class,
-                            sum(weight)::INT4,
-                            nid,
-                            tid 
-                     FROM (
-                        SELECT t2.id, t1.class, t2.nid, t2.tid, t2.weight 
-                        FROM % t1, tr_association t2 
-                        WHERE t1.id = t2.id
-                        ) s 
-                    GROUP BY GROUPING SETS((nid,tid),(class,nid,tid))',
-                    ARRAY[
-                        ed_name
-                    ]
-                );
-    ELSE
-        RETURN MADLIB_SCHEMA.__format
-                (
-                    'INSERT INTO training_instance_aux 
-                     SELECT ((null, null::FLOAT8, null::BOOL
-                             )::MADLIB_SCHEMA.__attr_info).*,
-                            null as class,
-                            sum(weight)::INT4,
-                            nid,
-                            tid 
-                     FROM (
-                        SELECT t2.id, t2.nid, t2.tid, t2.weight 
-                        FROM % t1, tr_association t2 
-                        WHERE t1.id = t2.id
-                        ) s 
-                    GROUP BY nid,tid
-                    UNION ALL
-                    SELECT ((null, null::FLOAT8, null::BOOL
-                            )::MADLIB_SCHEMA.__attr_info).*,
-                            class,
-                            sum(weight)::INT4,
-                            nid,
-                            tid 
-                     FROM (
-                        SELECT t2.id, t1.class, t2.nid, t2.tid, t2.weight 
-                        FROM % t1, tr_association t2 
-                        WHERE t1.id = t2.id
-                        ) s 
-                    GROUP BY class,nid,tid',
-                    ARRAY[
-                        ed_name,
-                        ed_name
-                    ]
-                );    
-    END IF;
-END
-$$ LANGUAGE PLPGSQL;
-
-                
-/*
- * @brief Construct the SQL statement which is used to generate the ACC set 
- *        for a feature.
- *
- * @param fid           The feature ID represented by a text.
- * @param fname         The name of the feature.
- * @param cont          Whether the feature is continuous or not.
- * @param stmt_in       The IN clause statement which will retrieve all the nodes 
- *                      chosen the feature.
- * @param ed_name       The full name of the encoded table.
- * @param sup_olap      Whether the database supports olap extensions or not.
- *                    
- * @return The SQL statement which is used to generate the ACC set.
- *
- */
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__construct_grouping_stmt_by_feature
-    (
-    fid         TEXT, 
-    fname       TEXT,
-    cont        TEXT,
-    stmt_in     TEXT,
-    ed_name     TEXT,
-    sup_olap    BOOL  
-    ) 
-RETURNS TEXT AS $$
-DECLARE
-BEGIN
-    IF (sup_olap) THEN
-        RETURN MADLIB_SCHEMA.__format
-                (
-                    'INSERT INTO training_instance_aux 
-                     SELECT ((%, %::FLOAT8, ''%''::BOOL)::MADLIB_SCHEMA.__attr_info).*,
-                            class,
-                            sum(weight)::INT4,
-                            nid,
-                            tid 
-                     FROM (
-                            -- We should filter out null value.
-                            -- We use inner join here. Outer join may introduce 
-                            -- unexpected null values.
-                            SELECT t1.%, t1.class, nid, tid, weight 
-                            FROM % t1, tr_association t2 
-                            WHERE t1.id = t2.id AND t1.% IS NOT NULL
-                          ) s 
-                     WHERE nid IN (%) 
-                     GROUP BY GROUPING SETS((%, nid, tid), (%, class, nid, tid))',
-                    ARRAY[
-                        fid, 
-                        fname, 
-                        cont,
-                        fname,
-                        ed_name,
-                        fname,
-                        stmt_in, 
-                        fname, 
-                        fname
-                    ]
-                );
-    ELSE
-        -- use UNION ALL to implement the grouping sets operator
-        RETURN MADLIB_SCHEMA.__format
-                (
-                    'INSERT INTO training_instance_aux 
-                     SELECT ((%, %::FLOAT8, ''%''::BOOL)::MADLIB_SCHEMA.__attr_info).*,
-                            null as class,
-                            sum(weight)::INT4,
-                            nid,
-                            tid 
-                     FROM (
-                            SELECT t1.%, t1.class, nid, tid, weight 
-                            FROM % t1, tr_association t2 
-                            WHERE t1.id = t2.id AND t1.% IS NOT NULL
-                          ) s 
-                     WHERE nid IN (%) 
-                     GROUP BY %, nid, tid
-                     UNION ALL
-                     SELECT ((%, %::FLOAT8, ''%''::BOOL)::MADLIB_SCHEMA.__attr_info).*,
-                            class,
-                            sum(weight)::INT4,
-                            nid,
-                            tid 
-                     FROM (
-                            SELECT t1.%, t1.class, nid, tid, weight 
-                            FROM % t1, tr_association t2 
-                            WHERE t1.id = t2.id AND t1.% IS NOT NULL
-                          ) s 
-                     WHERE nid IN (%) 
-                     GROUP BY %, class, nid, tid',
-                    ARRAY[
-                        fid, 
-                        fname, 
-                        cont, 
-                        fname,
-                        ed_name,
-                        fname,
-                        stmt_in, 
-                        fname, 
-                        fid, 
-                        fname, 
-                        cont, 
-                        fname,
-                        ed_name, 
-                        fname,
-                        stmt_in, 
-                        fname                        
-                    ]
-                );        
-    END IF;
-END
-$$ LANGUAGE PLPGSQL;
-
-
-/*
- * This UDT is used to keep the times of generating acs.
+ * This UDT is used to keep the times of generating acc.
  *
  * calc_pre_time   The time of pre-processing.
  * calc_acc_time   The time of calculating acc.
- * calc_acs_time   The time of calculating acs.
  *
  */
-DROP TYPE IF EXISTS MADLIB_SCHEMA.__gen_acs_time;
-CREATE TYPE MADLIB_SCHEMA.__gen_acs_time AS 
+DROP TYPE IF EXISTS MADLIB_SCHEMA.__gen_acc_time;
+CREATE TYPE MADLIB_SCHEMA.__gen_acc_time AS 
 (   
-    calc_pre_time       INTERVAL, 
-    calc_acc_time       INTERVAL,  
-    calc_acs_time       INTERVAL  
+    calc_pre_time       INTERVAL,
+    calc_acc_time       INTERVAL
 );
 
 
 /*
- * @brief Generate the training instances for current leaf nodes by grouping sets.
+ * @brief Generate the ACC for current leaf nodes.
  *
  * @param encoded_table_name    The full name of the encoded table for the  
  *                              training table.
@@ -997,53 +524,33 @@ CREATE TYPE MADLIB_SCHEMA.__gen_acs_time AS
  *                              relevant information of the input table.
  * @param result_table_name     The full name of the training result table.
  * @param num_featrue_try       The number of features will be chosen per node. 
- * @param max_split_point       The upper limit of sampled split points for 
- *                              continuous features. 
- * @param sup_olap              Whether the database supports olap extensions 
- *                              or not.
+ * @param num_classes           Total number of classes in training set.
  * @param verbosity             > 0 means this function runs in verbose mode. 
  *                    
- * @return The time information for generating ACS.
+ * @return The time information for generating ACC.
  *
  */
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__generate_training_instance
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__gen_acc
     (
     encoded_table_name      TEXT,
     metatable_name          TEXT,
     result_table_name       TEXT,
     num_featrue_try         INT,
-    max_split_point         INT,
-    sup_olap                BOOLEAN,
+    num_classes             INT,
     verbosity               INT
     )
-RETURNS MADLIB_SCHEMA.__gen_acs_time AS $$
+RETURNS MADLIB_SCHEMA.__gen_acc_time AS $$
 DECLARE
     curstmt             TEXT := '';
-    group_stmt          TEXT;
-    insert_stmt         TEXT;
     num_fids            INT  := 1;
-    classtable_name     TEXT;
     begin_calc_acc      TIMESTAMP;
-    begin_calc_acs      TIMESTAMP;
     begin_calc_pre      TIMESTAMP;
-    ret                 MADLIB_SCHEMA.__gen_acs_time;
+    tmp                 TEXT;
+    ret                 MADLIB_SCHEMA.__gen_acc_time;
 BEGIN
 
     begin_calc_pre = clock_timestamp();
 
-    EXECUTE 'TRUNCATE training_instance';
-    EXECUTE 'TRUNCATE training_instance_aux';
-   
-   -- get the class table
-    curstmt = MADLIB_SCHEMA.__format
-                (
-                'SELECT MADLIB_SCHEMA.__regclass_to_text(table_oid) as table_name 
-                FROM % 
-                WHERE column_type = ''c''',
-                metatable_name
-                );
-    EXECUTE curstmt INTO classtable_name;
-    
     -- get the number of features
     curstmt = MADLIB_SCHEMA.__format
                 (
@@ -1067,74 +574,37 @@ BEGIN
             verbosity
         );
     
-    -- get the sql statement for generating ACC of class    
-    curstmt = MADLIB_SCHEMA.__construct_grouping_stmt_by_class
-                  (
-                  encoded_table_name, 
-                  sup_olap
-                  );
-                
-    IF (verbosity > 0) THEN
-        RAISE INFO 'class grouping stmt:%', curstmt;
-    END IF;
-    
-    EXECUTE curstmt;
-        
-    -- get the sql statements for generating ACC for all the selected featuers
+    DROP TABLE IF EXISTS training_instance_aux;
     curstmt = MADLIB_SCHEMA.__format
-                (
-                    'SELECT MADLIB_SCHEMA.__construct_grouping_stmt_by_feature
-                        (
-                        fid::TEXT,
-                        fname::TEXT,
-                        MADLIB_SCHEMA.__to_char(iscont),
-                        ''SELECT nid FROM sf_association WHERE fid='' || fid,
-                        ''%'',
-                        ''%''::BOOLEAN
-                        )
-                     FROM 
-                        (
-                        SELECT t1.fid, t2.column_name as fname, 
-                               t2.is_cont as iscont 
-                        FROM 
-                            (
-                            SELECT DISTINCT fid 
-                            FROM sf_association
-                            ) t1 left join % t2 on t1.fid = t2.id
-                        ) t',
-                    ARRAY[
-                        encoded_table_name,
-                        MADLIB_SCHEMA.__to_char(sup_olap),
-                        metatable_name
-                    ]
-                );  
-
-    
-    IF (verbosity > 0) THEN
-        RAISE INFO 'acc stmt: %', curstmt;
-    END IF;      
-
-    FOR group_stmt IN EXECUTE curstmt LOOP
-        IF (verbosity > 0) THEN
-            RAISE INFO 'group stmt: %', group_stmt;
-        END IF; 
-        
-        EXECUTE group_stmt;
-    END LOOP;
-    
-    ret.calc_acc_time = clock_timestamp() - begin_calc_acc;
-    begin_calc_acs = clock_timestamp(); 
-    
-    -- generate the ACS
-    PERFORM MADLIB_SCHEMA.__create_training_instance
         (
-        'training_instance',
-        classtable_name,
-        'training_instance_aux',
-        max_split_point,
-        verbosity
+            'CREATE TEMP TABLE training_instance_aux AS
+             SELECT tid, nid, fid, fval, is_cont, 
+                    MADLIB_SCHEMA.__dt_acc_count_aggr(%,count::BIGINT,class::INT) AS count
+            FROM 
+            (
+                SELECT tr.tid, tr.nid, ed.fid, ed.fval, ed.is_cont, ed.class, sum(weight) as count
+                FROM % ed, tr_association tr, sf_association sf
+                WHERE tr.nid = sf.nid AND ed.fid = sf.fid AND ed.id = tr.id
+                GROUP BY tr.tid, tr.nid, ed.fid, ed.fval, ed.is_cont, ed.class            
+            ) l
+            GROUP BY tid,nid,fid, fval,is_cont 
+            m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (fid, fval)')',
+           ARRAY[
+               num_classes::TEXT,
+               'training_table_vertical'               
+           ]
         );
-    ret.calc_acs_time = clock_timestamp() - begin_calc_acs;
+
+    IF (verbosity > 0) THEN
+        RAISE INFO '%', curstmt;
+        FOR tmp IN EXECUTE 'EXPLAIN ANALYZE ' || curstmt LOOP
+            insert into connect_plan(plan) values(tmp);
+        END LOOP;
+    ELSE
+        EXECUTE curstmt;
+    END IF;
+
+    ret.calc_acc_time = clock_timestamp() - begin_calc_acc;
     
     RETURN ret;
 END
@@ -1151,8 +621,8 @@ CREATE TYPE MADLIB_SCHEMA.__rep_type AS
 DROP TYPE IF EXISTS MADLIB_SCHEMA.__rep_result CASCADE;
 CREATE TYPE MADLIB_SCHEMA.__rep_result AS
     (
-    maxclass  BIGINT,
-    isreplace BIGINT
+    max_class  BIGINT,
+    is_replace BIGINT
     );
 
 
@@ -1161,13 +631,13 @@ CREATE TYPE MADLIB_SCHEMA.__rep_result AS
  *        Error Pruning (REP).
  *
  * @param class_count_array     The array used to store the accumulated information.
- *                              [0]: the total number of mis-classified cases.
- *                              [i]: the number of cases belonging to the ith class.
+ *                              [0]: the total number of mis-classified samples.
+ *                              [i]: the number of samples belonging to the ith class.
  * @param classified_class      The predicted class based on our trained DT model.
  * @param original_class        The real class value provided in the validation set.
  * @param max_num_of_classes    The total number of distinct class values. 
  *                    
- * @return An updated state array.
+ * @return An updated class count array.
  *
  */
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__rep_aggr_class_count_sfunc
@@ -1183,22 +653,22 @@ LANGUAGE C IMMUTABLE;
 
 
 /*
- * @brief The pre-function for REP. It takes two class count arrays
- *        produced by the sfunc and combine them together.
+ * @brief Add the corresponding elements of the input arrays 
+ *        to create a new one.
  *
- * @param 1 arg     The array returned by sfun1.
- * @param 2 arg     The array returned by sfun2.
+ * @param 1 arg     The array 1.
+ * @param 2 arg     The array 2.
  *                    
- * @return The array with the combined information.
+ * @return The new array.
  *
  */
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__rep_aggr_class_count_prefunc
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__bigint_array_add
     (
     BIGINT[],
     BIGINT[]
     ) 
 RETURNS BIGINT[]
-AS 'MODULE_PATHNAME', 'dt_rep_aggr_class_count_prefunc'
+AS 'MODULE_PATHNAME', 'bigint_array_add'
 LANGUAGE C IMMUTABLE;
 
 
@@ -1243,11 +713,11 @@ DECLARE
     result MADLIB_SCHEMA.__rep_result;
 BEGIN
     IF(internal_result IS NOT NULL) THEN
-       result.maxclass = internal_result[1];
-       result.isreplace = internal_result[2];        
+       result.max_class  = internal_result[1];
+       result.is_replace = internal_result[2];        
     ELSE
-       result.maxclass = -1;
-       result.isreplace = -1;
+       result.max_class  = -1;
+       result.is_replace = -1;
     END IF;
     RETURN result;
 END
@@ -1268,48 +738,84 @@ CREATE AGGREGATE MADLIB_SCHEMA.__rep_aggr_class_count
     ) 
 (
   SFUNC=MADLIB_SCHEMA.__rep_aggr_class_count_sfunc,
-  m4_ifdef(`__GREENPLUM__', `prefunc=MADLIB_SCHEMA.__rep_aggr_class_count_prefunc,')
+  m4_ifdef(`__GREENPLUM__', `prefunc=MADLIB_SCHEMA.__bigint_array_add,')
   FINALFUNC=MADLIB_SCHEMA.__rep_aggr_class_count_ffunc,
   STYPE=BIGINT[]
 );
 
 
-/*
- * This type is used to store information for the calculated best split 
- *
- * tid                  The ID of the tree.
- * node_id              The ID of one node in the specified tree.
- * feature              The ID of the selected feature.
- * probability          The predicted probability of our chosen class.
- * maxclass             The ID of the class chosen by the algorithm.
- * infoGain             The information gain.
- * live                 1- For the chosen split, we should split further.
- *                      0- For the chosen split, we shouldn't split further.
- * ebp_coeff            total error for error-based pruning.
- * is_cont_feature      whether the selected feature is continuous.
- * split_value          If the selected feature is continuous, it specifies
- *                      the split value. Otherwise, it is of no use.
- * distinct_features    The number of distinct values for the selected feature.
- * total_size           The size of this tree node. 
- *
- */
-DROP TYPE IF EXISTS MADLIB_SCHEMA.__best_split_result CASCADE;
-CREATE TYPE MADLIB_SCHEMA.__best_split_result AS
-    (
-    tid                 INT,
-    node_id             INT,
-    feature             INT,
-    probability         FLOAT,
-    maxclass            INTEGER,
-    infogain            FLOAT,
-    live                INT,
-    ebp_coeff           FLOAT,
-    is_cont_feature     BOOLEAN,
-    split_value         FLOAT,
-    distinct_features   INT,
-    total_size          INT
-    );
 
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__array_indexed_agg_transfn
+    (
+    state       float8[], 
+    target      float8, 
+    array_size  int8, 
+    item_idx    int8
+    )
+RETURNS float8[]
+AS 'MODULE_PATHNAME', 'array_indexed_agg_transfn' 
+LANGUAGE C IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__array_indexed_agg_prefn
+    (
+    float8[], 
+    float8[]
+    )
+RETURNS float8[]
+AS 'MODULE_PATHNAME', 'array_indexed_agg_prefn' 
+LANGUAGE C STRICT IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__array_indexed_agg_finfn
+    (
+    float8[]
+    )
+RETURNS float8[]
+AS 'MODULE_PATHNAME', 'array_indexed_agg_finfn' 
+LANGUAGE C IMMUTABLE;
+                                                                            
+CREATE AGGREGATE MADLIB_SCHEMA.__array_indexed_agg(float8, int8, int8) (
+    SFUNC = MADLIB_SCHEMA.__array_indexed_agg_transfn,
+    m4_ifdef( `GREENPLUM',`PREFUNC   = MADLIB_SCHEMA.__array_indexed_agg_prefn,')
+    FINALFUNC = MADLIB_SCHEMA.__array_indexed_agg_finfn, 
+    STYPE = float8[]
+);
+
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dt_acc_count_sfunc
+    (
+    count_array         BIGINT[],
+    num_of_class        INT,
+    count               BIGINT,
+    class               INT
+    ) 
+RETURNS BIGINT[]  
+AS 'MODULE_PATHNAME', 'dt_acc_count_sfunc'
+LANGUAGE C VOLATILE;
+
+
+CREATE
+AGGREGATE MADLIB_SCHEMA.__dt_acc_count_aggr
+    (
+    INT,
+    BIGINT,
+    INT
+    ) 
+(
+  SFUNC=MADLIB_SCHEMA.__dt_acc_count_sfunc,
+  m4_ifdef(`__GREENPLUM__', `prefunc=MADLIB_SCHEMA.__bigint_array_add,')
+  STYPE=BIGINT[]
+);
+
+CREATE
+AGGREGATE MADLIB_SCHEMA.__bigint_array_sum
+    (
+    BIGINT[]
+    ) 
+(
+  SFUNC=MADLIB_SCHEMA.__bigint_array_add,
+  m4_ifdef(`__GREENPLUM__', `prefunc=MADLIB_SCHEMA.__bigint_array_add,')
+  STYPE=BIGINT[]
+);
 
 /*
  * @brief This function find the best split and return the information.
@@ -1322,9 +828,9 @@ CREATE TYPE MADLIB_SCHEMA.__best_split_result AS
  *                            Trees Grown on Very Large Data Sets Can Work!'.
  * @param feature_table_name  Is is the name of one internal table, which contains
  *                            meta data for each feature.
- * @param sp_criterion        It defines the split criterion to be used.
+ * @param split_criterion     It defines the split criterion to be used.
  *                            (1- information gain. 2- gain ratio. 3- gini).
- * @param continue_gow        It specifies whether we should still grow the tree
+ * @param continue_grow       It specifies whether we should still grow the tree
  *                            on the selected branch.
  * @param output_table        It specifies the table used to store the chosen splits.
  * @param h2hmv_routine_id    Specifies how to handle missing values. 
@@ -1336,68 +842,62 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__find_best_split
     table_name              TEXT, 
     confidence_level        FLOAT,
     feature_table_name      TEXT, 
-    sp_criterion            INT, 
-    continue_gow            INT,
+    split_criterion         INT, 
+    continue_grow           INT,
     output_table            TEXT,
-    h2hmv_routine_id        INT
+    h2hmv_routine_id        INT,
+    num_classes             INT
     ) 
 RETURNS VOID AS $$
 DECLARE
     total_size         INT;
-    result             MADLIB_SCHEMA.__best_split_result;
-    has_cont_text      TEXT := 't';
     curstmt            TEXT := '';
-    result_rec         RECORD;
     begin_func_exec    TIMESTAMP;
-    best_answer        FLOAT8[];
-    select_stmt		   TEXT;
-	explain_text       TEXT;
-	begin_exec		   TIMESTAMP;
-    pre_time		   INTERVAL;
-	scv_time		   INTERVAL;
-	pst_time		   INTERVAL;
-	is_first		   BOOL := 't'::BOOL;
+    select_stmt        TEXT;
+    tmp                TEXT;
 BEGIN    
     begin_func_exec = clock_timestamp();
-    begin_exec = clock_timestamp();
-	pre_time = begin_exec - begin_exec;
-	scv_time = pre_time;
-	pst_time = pre_time;
-
-
+    
     IF (h2hmv_routine_id=1) THEN
         -- For ignore, we need the true size of nodes to handle the missing values.
-        TRUNCATE node_size_aux;
-    
-        SELECT MADLIB_SCHEMA.__format
-           (
-           'INSERT INTO node_size_aux 
-            SELECT tid,nid, 
-               MAX(le) 
-            FROM %
-            WHERE fid IS NULL 
-            AND nid IS NOT NULL 
-	        AND tid IS NOT NULL 
-            AND class IS NULL
-            GROUP BY tid,nid;',
-            table_name
-           )
-        INTO curstmt;
-    
-        EXECUTE curstmt;
-
-        select_stmt = 'SELECT t1.*, t2.total_size FROM '||table_name||' t1, node_size_aux t2
-                WHERE t1.nid = t2.nid AND t1.tid=t2.tid AND 
-                        (t1.fid IS NOT NULL) AND (t1.tid IS NOT NULL) AND
-                        (t1.nid IS NOT NULL AND t2.nid IS NOT NULL)';
+        select_stmt =  'SELECT t1.tid, t1.nid, t1.fid, t1.total, t2.node_size::BIGINT 
+                        FROM
+                        (
+                            SELECT tid, nid, fid, 
+                            m4_ifdef(`__GREENPLUM__', `sum(count)', `MADLIB_SCHEMA.__bigint_array_sum(count)') as total
+                            FROM training_instance_aux
+                            GROUP BY tid, nid, fid
+                        ) t1 INNER JOIN node_size_aux t2 
+                        ON t1.tid=t2.tid AND t1.nid=t2.nid';
     ELSE
         -- For explicit, the calculated node size from the aggregation is correct.
         -- We can set NULL, which denotes we can safely use the counted value.
-        select_stmt = 'SELECT t1.*, NULL::float as total_size FROM '||table_name||' t1
-                WHERE (t1.fid IS NOT NULL) AND (t1.tid IS NOT NULL) AND 
-                        (t1.nid IS NOT NULL)';		
+        select_stmt =  'SELECT tid, nid, fid, 
+                        m4_ifdef(`__GREENPLUM__', `sum(count)', `MADLIB_SCHEMA.__bigint_array_sum(count)') as total, 
+                        NULL::BIGINT AS node_size
+                        FROM training_instance_aux
+                        GROUP BY tid, nid, fid';
     END IF;
 
+    /*
+     * This table is used to store information for the calculated best split 
+     *
+     * tid                  The ID of the tree.
+     * node_id              The ID of one node in the specified tree.
+     * feature              The ID of the selected feature.
+     * probability          The predicted probability of our chosen class.
+     * max_class            The ID of the class chosen by the algorithm.
+     * max_scv              The maximum split criterion value.
+     * live                 1- For the chosen split, we should split further.
+     *                      0- For the chosen split, we shouldn't split further.
+     * ebp_coeff            total error for error-based pruning.
+     * is_cont              whether the selected feature is continuous.
+     * split_value          If the selected feature is continuous, it specifies
+     *                      the split value. Otherwise, it is of no use.
+     * distinct_features    The number of distinct values for the selected feature.
+     * node_size            The size of this tree node. 
+     *
+     */
     EXECUTE 'DROP TABLE IF EXISTS '||output_table;
     EXECUTE 'CREATE TEMP TABLE '||output_table||' 
     (
@@ -1405,155 +905,85 @@ BEGIN
         node_id             INT,
         feature             INT,
         probability         FLOAT,
-        maxclass            INTEGER,
-        infogain            FLOAT,
+        max_class           INTEGER,
+        max_scv             FLOAT,
         live                INT,
         ebp_coeff           FLOAT,
-        is_cont_feature     BOOLEAN,
+        is_cont             BOOLEAN,
         split_value         FLOAT,
         distinct_features   INT,
         node_size           INT
     ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (node_id)');';
+     
 
-m4_changequote(`>>>', `<<<')
-m4_ifdef(>>>__HAS_ORDERED_AGGREGATES__<<<, >>>
-    -- With ordered aggregate support, we can use this facility.
+    EXECUTE 'DROP TABLE IF EXISTS tmp_best_table';
+
     SELECT MADLIB_SCHEMA.__format
         (
-        'SELECT s1.tid, s1.nid, 
-            MAX(ARRAY[s1.info_impurity, s1.fid, 
-            coalesce(s1.split_value, ''NaN''::FLOAT8), 
-            s1.class_prob, s1.class_id, s1.total_size]::FLOAT8[]) as info
-        FROM (
-            SELECT tid, nid, fid, split_value,
-                (MADLIB_SCHEMA.__scv_aggr_wrapper(
-                    MADLIB_SCHEMA.__scv_aggr
-                        (%,fval,class,is_cont,le,gt, total_size
-                        ORDER BY fval desc,class desc)
-                    )::MADLIB_SCHEMA.__scv_aggr_result).*
+        'INSERT INTO %
+         SELECT tid, nid, best_scv[6], best_scv[4], best_scv[3], best_scv[1],
+                CASE WHEN (best_scv[1] < 1e-9 OR best_scv[4] > 1-1e-9 OR % <= 0 ) THEN
+                        0
+                ELSE
+                        1
+                END AS live,
+                MADLIB_SCHEMA.__ebp_calc_errors
+                    (best_scv[5], best_scv[4], %) AS ebp_coeff,
+                o2.is_cont, 
+                CASE WHEN( o2.is_cont ) THEN
+                    best_scv[7]
+                ELSE
+                    NULL
+                END AS split_value,
+                o2.num_dist_value, best_scv[5]
+        FROM
+        (
+            SELECT s1.tid, s1.nid,  
+                madlib.__best_scv_aggr(scv, s1.fid, coalesce(s1.split_value,0)) as best_scv
             FROM (
-                %
-                ) y 
-            GROUP BY tid, nid,fid,split_value 
-            ) s1  
-        GROUP BY s1.tid, s1.nid
-        ORDER BY s1.tid, s1.nid;',
-        MADLIB_SCHEMA.__to_char(sp_criterion),
-        select_stmt
-        )
-    INTO curstmt;   
-<<<, >>>
-    -- Without ordered aggregate support, we use window function as a workaround.
-    -- The performance is much worse than ordered aggregate.
-    SELECT MADLIB_SCHEMA.__format
-        (
-        'SELECT s1.tid, s1.nid, 
-            MAX(ARRAY[s1.info_impurity, s1.fid, 
-            coalesce(s1.split_value, ''NaN''::FLOAT8), 
-            s1.class_prob, s1.class_id, s1.total_size]::FLOAT8[]) as info
-        FROM (
-            SELECT * FROM (
-              SELECT tid, nid,fid,split_value,
-                row_number() over
-                        (PARTITION BY tid, nid,fid,split_value 
-                         ORDER BY fval asc,class asc) as row_num,
-                (MADLIB_SCHEMA.__scv_aggr_wrapper(
-                    MADLIB_SCHEMA.__scv_aggr
-                        (%,fval,class,is_cont,le,gt, total_size) over
-                        (PARTITION BY tid, nid, fid, split_value 
-                         ORDER BY fval desc,class desc)
-                    )::MADLIB_SCHEMA.__scv_aggr_result).*
-              FROM (
-                %
-                ) y 
-              ) k where row_num =1 
-            ) s1    
-        GROUP BY s1.tid, s1.nid
-        ORDER BY s1.tid, s1.nid;',
-        MADLIB_SCHEMA.__to_char(sp_criterion),
-        select_stmt
-        )
-    INTO curstmt;   
-<<<)
-m4_changequote(>>>`<<<, >>>'<<<)
-
-    RAISE INFO '%', curstmt;
-
-    pre_time = clock_timestamp() - begin_exec;
-	begin_exec = clock_timestamp();
-
-    EXECUTE 'DROP TABLE IF EXISTS tmp_best';
-	EXECUTE 'CREATE TEMP TABLE tmp_best AS ' || curstmt;
-    scv_time = clock_timestamp() - begin_exec;
-
-    begin_exec = clock_timestamp();
-
-    -- s1.info_impurity[1], s1.fid[2], s1.split_value[3], 
-    -- s2.class_prob[4], s2.class_id[5], s1.total_size[6]
-    FOR result_rec IN EXECUTE ('SELECT * from tmp_best') LOOP
-	    result.tid                  = result_rec.tid;
-        result.node_id              = result_rec.nid;
-        best_answer                 = result_rec.info;
-        result.feature              = best_answer[2];
-        result.maxclass             = best_answer[5];
-        result.probability          = best_answer[4];
-        result.infogain             = best_answer[1];
-        result.total_size           = best_answer[6];
-        result.distinct_features    = MADLIB_SCHEMA.__distinct_feature_value
-                                          (
-                                          feature_table_name, 
-                                          result.feature
-                                          );
-        
-        IF (result.probability > 0.999999999 
-            OR result.infogain < 0.000000001
-            OR continue_gow <= 0) THEN
-            result.live = 0;
-        ELSE
-            result.live = 1;
-        END IF;
-        
-        result.ebp_coeff = MADLIB_SCHEMA.__ebp_calc_errors
-                               (
-                               result.total_size, 
-                               result.probability, 
-                               confidence_level
-                               ); 
-        
-        IF (best_answer[3] = 'NaN'::FLOAT8) THEN
-            result.split_value      = NULL;
-        ELSE
-            result.split_value      = best_answer[3];
-        END IF;
-        result.is_cont_feature      = (result.split_value IS NOT NULL);
-
-        SELECT MADLIB_SCHEMA.__format
-            (
-            'INSERT INTO % 
-                VALUES(%,%,%,%,%,%,%,%,''%'',%,%,%);',
-            ARRAY[
+                SELECT t1.tid, t1.nid, t1.fid, split_value,
+                        MADLIB_SCHEMA.__scv_aggr
+                            (%, is_cont, %, le, total, t2.node_size) AS scv
+                FROM 
+                    (
+                        SELECT tid, nid, fid, fval, is_cont, 
+                        CASE WHEN (is_cont) THEN
+                           fval 
+                        ELSE
+                            NULL::FLOAT8
+                        END AS split_value,
+                        CASE WHEN (is_cont) THEN
+                                m4_ifdef(`__GREENPLUM__', `sum(count)', `MADLIB_SCHEMA.__bigint_array_sum(count)') OVER 
+                                    (PARTITION BY tid, nid, fid ORDER BY fval
+                                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                        ELSE
+                                count
+                        END AS le
+                        FROM training_instance_aux
+                    ) t1,
+                    (
+                        %
+                    ) t2
+                WHERE t1.tid = t2.tid AND t1.nid = t2.nid AND t1.fid = t2.fid
+                GROUP BY t1.tid, t1.nid, t1.fid, split_value
+            ) s1
+            GROUP BY s1.tid, s1.nid
+        ) o1 INNER JOIN % o2 ON o1.best_scv[6]::INT=o2.id',
+			ARRAY[
                 output_table,
-                result.tid::TEXT,
-                result.node_id::TEXT,
-                result.feature::TEXT,
-                result.probability::TEXT,
-                result.maxclass::TEXT,
-                result.infogain::TEXT,
-                result.live::TEXT,
-                result.ebp_coeff::TEXT,
-                MADLIB_SCHEMA.__to_char(result.is_cont_feature),
-                MADLIB_SCHEMA.__to_char(result.split_value),
-                result.distinct_features::TEXT,
-                result.total_size::TEXT
-            ]
-            )
-        INTO curstmt;
-        EXECUTE curstmt;
-    END LOOP;
-        
-	pst_time = clock_timestamp() - begin_exec;
+                continue_grow::TEXT,
+                confidence_level::TEXT, 
+                split_criterion::TEXT,
+                num_classes::TEXT,
+                select_stmt,
+                feature_table_name
+			]
+        ) INTO curstmt;
 
-    RAISE INFO 'SCV calcuation: pretime, %, scv_time, %, psttime, %', pre_time, scv_time, pst_time;
+        RAISE INFO '%', curstmt;
+        FOR tmp IN EXECUTE 'EXPLAIN ANALYZE ' || curstmt LOOP
+            insert into connect_plan(plan) values(tmp);
+        END LOOP;
 
     RETURN;
 END
@@ -1575,71 +1005,6 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__create_tree_tables
     ) 
 RETURNS void AS $$ 
 BEGIN
-    --  The table of training_instance is used to store the ACS set generated by
-    --  grouping set and window function. This set is feed into the aggregation
-    --  for entropy/gini computation.
-    --  Columns:
-    --      fid:            It is used to uniquely identify one feature.
-    --      fval:           It is used to store the value of one feature.
-    --      class:          The class of that record.
-    --      is_cont:        Whether this feature is continuous.
-    --      split_value:    The split value for a continuous feature. It is 
-    --                      of no use for discrete features.
-    --      le:             Number of records less than or equal to split value.
-    --      gt:             Number of records greater than split value.
-    --      nid:            The node id.
-    --      tid:            The tree id.
-    DROP TABLE IF EXISTS training_instance CASCADE;
-    CREATE TEMP TABLE training_instance
-    (
-        fid            INTEGER,
-        fval           FLOAT8,
-        class          INTEGER,
-        is_cont        BOOLEAN,
-        split_value    FLOAT8,
-        le             BIGINT,
-        gt             BIGINT,
-        nid            INT,
-        tid            INT
-    ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (fid, fval)');
-	DROP TABLE IF EXISTS training_instance_copy;
-                 CREATE TABLE training_instance_copy AS 
-				                  SELECT *, 0 as tree_depth, '00:00:00'::INTERVAL as acs_time 
-								                   FROM training_instance;
-
-    --  The table of training_instance_temp is of the same structure
-    --  as table above. It is used when we need modify the training_instance
-    --  before feeding it to the scv aggregation. Currently, we only use 
-    --  it when max_split_points is set to a positive number.
-    DROP TABLE IF EXISTS training_instance_temp CASCADE;
-    CREATE TEMP TABLE training_instance_temp
-    (
-        fid            INTEGER,
-        fval           FLOAT8,
-        class          INTEGER,
-        is_cont        BOOLEAN,
-        split_value    FLOAT8,
-        le             BIGINT,
-        gt             BIGINT,
-        nid            INT,
-        tid            INT
-    ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (fid, fval)');
-
-    
-    --  The table of training_instance_aux is used to hold the results of ACC 
-    --  generated by grouping sets. Based on this set, we use window function
-    --  for further processing and generate the contents in training_instance.
-    DROP TABLE IF EXISTS training_instance_aux CASCADE;
-    CREATE TEMP TABLE training_instance_aux
-    (
-        fid             INTEGER,
-        fval            FLOAT8,
-        is_cont         BOOLEAN,
-        class           INTEGER,
-        count           INTEGER,
-        nid             INT,
-        tid             INT
-    ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (fid, fval)');
 
     --  The table of node_size_aux records the size of each node. It is used
     --  for missing value handling.
@@ -1648,33 +1013,34 @@ BEGIN
     (
         tid             INT,
         nid             INT,
-        total_size      INT
+        node_size       INT
     )m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (tid,nid)');
     
     -- The table below stores the decision tree information just constructed.
-    -- It is an internal table, which contains some redundant nodes. 
-    -- In the last step, we will remove those redundant nodes and move the
-    -- useful records to the table specified by user.
     -- Columns:
-    --      id:             The ID of the node represented by this row. Tree node IDs are unique 
-    --                      across all trees. The IDs of all children of a certain node is made to
-    --                      be continuous.    
-    --      tree_location:  An array containing the encoded values of all the features on 
-	--						the path from the root node to the current node. 
-    --                      For the root node, the location value is {0}.
-    --      feature:        The ID of the best split feature chosen for the node represented by this row.
+    --      id:             The ID of the node represented by this row. Tree 
+    --                      node IDs are unique across all trees. The IDs of 
+    --                      all children of a node is made to be continuous.
+    --      tree_location:  An array containing the encoded values of all the 
+    --                      features on the path from the root node to the 
+    --                      current node. For the root node, the location 
+    --                      value is {0}.
+    --      feature:        The ID of the best split feature chosen for the 
+    --                      node represented by this row.
     --      probability:    If forced to make a call for a dominant class 
     --                      at a given point this would be the confidence of the 
     --                      call (this is only an estimated value).
-    --      ebp_coeff:      The total errors used by error based pruning (ebp) based on the 
-    --                      specified confidence level. RF doesnot do EBP therefore for RF nodes, 
-    --                      this column always contains 1.    
-    --      maxclass:       If forced to make a call for a dominant class 
+    --      ebp_coeff:      The total errors used by error based pruning (ebp) 
+    --                      based on the specified confidence level. RF does
+    --                      not do EBP therefore for RF nodes, this column always 
+    --                      contains 1.    
+    --      max_class:      If forced to make a call for a dominant class 
     --                      at a given point this is the selected class.
     --      scv:            The splitting criteria value (scv) computed at this node.
-    --      live:           Specifies whether the node should be further split or not. A positive 
-    --                      value indicates further split of the node represented by this row is needed.
-    --      case_size:      The number of cases at this node.
+    --      live:           Specifies whether the node should be further split 
+    --                      or not. A positive value indicates further split of
+    --                      the node represented by this row is needed.
+    --      num_of_samples: The number of samples at this node.
     --      parent_id:      Id of the parent branch.
     --      lmc_nid:        Leftmost child (lmc) node id of the node represented
     --                      by the current row.
@@ -1685,7 +1051,8 @@ BEGIN
     --                      SELECT DISTINCT ON(parent_id) id FROM tree_table 
     --                      WHERE parent_id = $pid ORDER BY parent_id, id desc
     --                      INTO max_child_nid;
-    --                      2. Get child nodes' ids and condition values by a while loop
+    --                      2. Get child nodes' ids and condition values by a 
+    --                         while loop
     --                      node_count = 1;
     --                      WHILE (lmc_nid IS NOT NULL) AND 
     --                          (0 < node_count AND lmc_nid <= max_child_nid) LOOP
@@ -1696,13 +1063,14 @@ BEGIN
     --                          WHERE id = $lmc_nid AND parent_id = $pid 
     --                          INTO node_count;        
     --                      END LOOP;
-    --      is_continuous:  It specifies whether the selected feature is a 
+    --      is_cont:        It specifies whether the selected feature is a 
     --                      continuous feature.
     --      split_value:    For continuous feature, it specifies the split value.
     --                      Otherwise, it is of no meaning and fixed to 0.  
     --      tid:            The id of a tree that this node belongs to.
-    --      dp_ids:         An array containing the IDs of the non-continuous features chosen by 
-    --                      all ancestors nodes (starting from the root) for splitting.
+    --      dp_ids:         An array containing the IDs of the non-continuous 
+    --                      features chosen by all ancestors nodes (starting 
+    --                      from the root) for splitting.
     --
     -- The table below stores the final decision tree information.
     -- It is an the table specified by users. 
@@ -1715,14 +1083,14 @@ BEGIN
         feature         INT,
         probability     FLOAT,
         ebp_coeff       FLOAT,
-        maxclass        INTEGER,
+        max_class       INTEGER,
         scv             FLOAT,
         live            INT,
-        case_size       INT,
+        num_of_samples  INT,
         parent_id       INT,
         lmc_nid         INT,
         lmc_fval        INT,
-        is_continuous   BOOLEAN,
+        is_cont         BOOLEAN,
         split_value     FLOAT,
         tid             INT,
         dp_ids          INT[]
@@ -1731,8 +1099,8 @@ BEGIN
     -- The following table stored the auxiliary information for updating the 
     -- association table, so that the updating operation only need to  
     -- join the encoded table with association table once
-    EXECUTE 'DROP TABLE IF EXISTS asso_aux CASCADE';
-    CREATE TEMP TABLE asso_aux
+    EXECUTE 'DROP TABLE IF EXISTS assoc_aux CASCADE';
+    CREATE TEMP TABLE assoc_aux
     (
         nid         INT, 
         fid         INT, 
@@ -1781,14 +1149,12 @@ BEGIN
         (
         'SELECT COUNT(*) 
          FROM %
-         WHERE % NOT IN
-            (SELECT % FROM % WHERE % IS NOT NULL)',
+         WHERE MADLIB_SCHEMA.__to_char(%) NOT IN
+            (SELECT fval FROM % WHERE fval IS NOT NULL)',
         ARRAY[
             validation_table,
             class_col_name,
-            class_col_name,
-            MADLIB_SCHEMA.__get_classtable_name(metatable_name),
-            class_col_name
+            MADLIB_SCHEMA.__get_classtable_name(metatable_name)
         ]
         )
     INTO curstmt;
@@ -1830,13 +1196,13 @@ m4_changequote(>>>`<<<, >>>'<<<)
         CREATE TEMP TABLE selected_parent_ids_rep
         (
             parent_id BIGINT,
-            maxclass  INT
+            max_class  INT
         ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (parent_id)');
        
         SELECT MADLIB_SCHEMA.__format
             (
                 'INSERT INTO selected_parent_ids_rep 
-                SELECT parent_id, (t.g).maxclass as maxclass 
+                SELECT parent_id, (t.g).max_class as max_class 
                 FROM 
                 (
                     SELECT parent_id, 
@@ -1853,7 +1219,7 @@ m4_changequote(>>>`<<<, >>>'<<<)
                     WHERE c.id=s.% 
                     GROUP BY parent_id
                 ) t 
-                WHERE (t.g).isreplace >= 0 AND 
+                WHERE (t.g).is_replace >= 0 AND 
                       t.parent_id IN 
                       (
                           Select parent_id FROM % 
@@ -1897,7 +1263,7 @@ m4_ifdef(`__GREENPLUM_PRE_4_1__', >>>
         SELECT MADLIB_SCHEMA.__format
             (
             'INSERT INTO %(id, class, parent_id, leaf_id)
-             SELECT m.id,  t.maxclass, t.parent_id, t.id
+             SELECT m.id,  t.max_class, t.parent_id, t.id
              FROM % m, % t
              WHERE t.id IN (SELECT parent_id FROM selected_parent_ids_rep) AND
              m.parent_id = t.id',
@@ -1915,7 +1281,7 @@ m4_ifdef(`__GREENPLUM_PRE_4_1__', >>>
 <<<, >>>
         SELECT MADLIB_SCHEMA.__format
             (
-                'UPDATE % m set class = t.maxclass, 
+                'UPDATE % m set class = t.max_class, 
                  parent_id = t.parent_id,leaf_id = t.id  
                  FROM % t
                  WHERE t.id IN (SELECT parent_id FROM selected_parent_ids_rep) AND
@@ -1941,7 +1307,7 @@ m4_changequote(>>>`<<<, >>>'<<<)
         SELECT MADLIB_SCHEMA.__format
             (
                 'UPDATE % t1 SET lmc_nid = NULL, 
-                 lmc_fval = NULL, maxclass = t2.maxclass 
+                 lmc_fval = NULL, max_class = t2.max_class 
                  FROM selected_parent_ids_rep t2
                  WHERE t1.id = t2.parent_id;',
                 tree_table_name
@@ -2081,7 +1447,7 @@ DECLARE
 BEGIN
 
     EXECUTE ' DELETE FROM ' || result_tree_table_name || 
-            ' WHERE COALESCE(case_size,0) = 0';
+            ' WHERE COALESCE(num_of_samples,0) = 0';
     
     -- for each node, find the left most child node id and the feature value, and
     -- update the node's lmc_nid and lmc_fval column     
@@ -2116,16 +1482,14 @@ $$ LANGUAGE PLPGSQL;
  *      features_per_node        The number of features chosen for each tree.
  *      num_tree_nodes           The number of tree nodes.
  *      max_tree_depth           The max tree depth.
- *      calc_acs_time            Total time of calculating acs.
- *      acc_to_acs_time          Time of calculating acs based on the acc.
- *      calc_acc_time            Time of calculating acc.
+ *      calc_acc_time            Total time of calculating acc.
  *      calc_pre_time            Time of preprocessing when calculating acc.
  *      update_time              Total time of updating operation after found
  *                               the best time. 
  *      update_best              Time of updating the best splits' information.
  *      update_child             Time of generating the child nodes.
  *      update_nid               Time of updating the assigned node IDs.
- *      find_best_time           Time of calculating the best splits.     
+ *      scv_acs_time           Time of calculating the best splits.     
  *      prune_time               Time of tree pruning.
  *
  */
@@ -2136,17 +1500,153 @@ CREATE TYPE MADLIB_SCHEMA.__train_result AS
     features_per_node        INT,
     num_tree_nodes           INT,
     max_tree_depth           INT,
-    calc_acs_time            INTERVAL,
-    acc_to_acs_time          INTERVAL,
     calc_acc_time            INTERVAL,
     calc_pre_time            INTERVAL,
     update_time              INTERVAL,
     update_best              INTERVAL,
     update_child             INTERVAL,
     update_nid               INTERVAL,
-    find_best_time           INTERVAL,
+    scv_acs_time             INTERVAL,
     prune_time               INTERVAL
 );
+
+
+/*
+ * @brief The function samples a set of integer values between low and high.
+ *
+ * @param num_of_samples  The number of records to be sampled.
+ * @param low             The low limit of sampled values.
+ * @param high            The high limit of sampled values.
+ *
+ * @return A set of integer values sampled randomly between [low, high].
+ *
+ */
+DROP FUNCTION IF EXISTS MADLIB_SCHEMA.__sample_within_range
+    (
+    BIGINT,
+    BIGINT,
+    BIGINT
+    )CASCADE;
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__sample_within_range
+    (
+    num_of_samples     BIGINT,
+    low             BIGINT,
+    high            BIGINT
+    ) 
+RETURNS SETOF BIGINT  
+AS 'MODULE_PATHNAME', 'dt_sample_within_range'
+LANGUAGE C STRICT VOLATILE;
+
+
+/*
+ * @brief The function samples with replacement from source table and store
+ *        the results to target table.
+ * 
+ *        In this function, we firstly calculate how many samples should be
+ *        generated in each segment. Then, we let those segments sample with
+ *        replacement between the maximum ID and minimum ID of the source table 
+ *        in parallel and assign samples to different trees. 
+ *
+ *        If there are gaps in the ID column of the source table, we sample
+ *        extra records in proportion to the number of gaps. At last, we remove
+ *        these invalid samples with an inner join operation with the source
+ *        table. Since we target big data, this strategy works quite well.
+ *
+ * @param num_of_tree     The number of trees to be trained.
+ * @param size_per_tree   The number of records to be sampled for each tree.
+ * @param src_table       The name of the table to be sampled from.
+ * @param target_table    The name of the table used to store the results.
+ *
+ */
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__sample_with_replacement
+    ( 
+    num_of_tree     INT,
+    size_per_tree   INT, 
+    src_table       TEXT,
+    target_table    TEXT
+    ) 
+RETURNS VOID AS $$
+DECLARE
+    segment_num     INT;
+    sample_per_seg  INT;
+    sample_ratio    FLOAT8;
+    record_num      FLOAT8;
+    min_id          INT;
+    max_id          INT;
+    range           FLOAT8;
+    stmt            TEXT;
+BEGIN
+
+m4_changequote(`>>>', `<<<')
+m4_ifdef(>>>__GREENPLUM__<<<, >>>
+    -- get the segment number
+    SELECT COUNT(distinct content) FROM gp_segment_configuration 
+        WHERE content<>-1 INTO segment_num;
+<<<, >>>
+    -- fix the segment number to 1 for PG
+    segment_num = 1;
+<<<)
+m4_changequote(>>>`<<<, >>>'<<<)
+
+
+    DROP TABLE IF EXISTS auxiliary_segment_table;
+    CREATE TEMP TABLE auxiliary_segment_table
+    (
+        segment_id  INT   
+    ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY(segment_id)');
+
+    -- Insert segment_num of records distributed by segment id
+    EXECUTE 'INSERT INTO auxiliary_segment_table 
+        SELECT generate_series(1,'||segment_num||');';
+
+    EXECUTE 'SELECT max(id),min(id), count(DISTINCT id) as record_num 
+        FROM '||src_table||';' INTO max_id,min_id,record_num;
+    range=max_id-min_id+1;
+
+    -- compute the sample ratio
+    sample_ratio= range/record_num;
+
+    -- compute how many records should be sampled by each segment
+    sample_per_seg=((sample_ratio*num_of_tree*size_per_tree)/segment_num)::INT;
+    
+    DROP TABLE IF EXISTS sample_result_temp;
+    CREATE TEMP TABLE sample_result_temp
+    (
+        sample_id   SERIAL,
+        record_id   INT
+    ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY(record_id)');
+
+    -- sample in parallel by all segments
+    stmt= 'INSERT INTO sample_result_temp(record_id) 
+        SELECT MADLIB_SCHEMA.__sample_within_range('||sample_per_seg||','||min_id
+        ||','||max_id||') FROM auxiliary_segment_table;';
+
+    EXECUTE stmt;
+
+    -- remove those invalid samples with join operation
+    -- add the weight field
+    EXECUTE 'DROP TABLE IF EXISTS '||target_table;
+	stmt = MADLIB_SCHEMA.__format
+			(
+				E'CREATE TEMP TABLE %(id, tid, nid, weight) AS
+				  SELECT record_id, 
+				        ((sample_id - 1)\\% % + 1)::INT AS tid, 
+				        ((sample_id - 1)\\% % + 1)::INT AS nid, 
+				        count(*) AS weight
+				  FROM sample_result_temp t, % k
+				  WHERE t.record_id=k.id
+				  GROUP BY record_id, tid, nid
+				  m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY(id)');',
+				ARRAY[
+					target_table,
+					num_of_tree::TEXT,
+					num_of_tree::TEXT,
+					src_table
+				]
+			);
+	EXECUTE stmt;
+END
+$$ LANGUAGE PLPGSQL VOLATILE;
 
 
 /*
@@ -2201,15 +1701,14 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__train_tree
     sampling_percentage     FLOAT,
     node_prune_threshold    FLOAT,
     node_split_threshold    FLOAT,
-    sampling_needed         BOOLEAN,    
-    max_split_point         INT,
-    h2hmv_routine_id	    INT,
+    sampling_needed         BOOLEAN,
+    h2hmv_routine_id        INT,
     verbosity               INT
     ) 
 RETURNS RECORD AS $$
 DECLARE
     num_live_nodes              INT;
-    nid                         BIGINT;
+    max_nid                     INT;
     location                    INT[];
     temp_location               INT[];
     num_classes                 INT;
@@ -2217,7 +1716,8 @@ DECLARE
     location_size               INT;
     begin_func_exec             TIMESTAMP;
     begin_find_best             TIMESTAMP;
-    find_best_time              INTERVAL;    
+    scv_acs_time                INTERVAL;
+    tmp                         TEXT;
     begin_data_transfer         TIMESTAMP;
     begin_update_best           TIMESTAMP;
     begin_update_child          TIMESTAMP;
@@ -2225,46 +1725,44 @@ DECLARE
     calc_update_best            INTERVAL;
     calc_update_child           INTERVAL;
     calc_update_nid             INTERVAL;
-    data_transfer_time          INTERVAL;
+    ins_upd_time                INTERVAL;
     begin_olap_acs              TIMESTAMP;
-    calc_acs_time               INTERVAL;
     calc_acc_time               INTERVAL;
     calc_pre_time               INTERVAL;
     calc_olap_time              INTERVAL;
-    begin_bld_asso              TIMESTAMP;
-    bld_asso_time               INTERVAL;    
+    begin_bld_assoc             TIMESTAMP;
+    bld_assoc_time              INTERVAL;    
     begin_prune                 TIMESTAMP;
     prune_time                  INTERVAL;
     total_size                  FLOAT;
-    sp_crit                     INT := 1;
+    sc_code                     INT := 1;
     curstmt                     TEXT := '';
     grow_tree                   INT := max_tree_depth;
     ret                         MADLIB_SCHEMA.__train_result;
     curr_level                  INT := 1;
     dp_ids                      INT[];
     dp_ids_text                 TEXT;
-    instance_time               MADLIB_SCHEMA.__gen_acs_time;
+    instance_time               MADLIB_SCHEMA.__gen_acc_time;
 BEGIN  
-	-- record the time costed in different steps when training
+    -- record the time costed in different steps when training
     begin_func_exec     = clock_timestamp();
-    find_best_time      = begin_func_exec - begin_func_exec;
-    calc_olap_time      = find_best_time;
-    calc_acs_time       = find_best_time;
-    calc_acc_time       = find_best_time;
-    calc_pre_time       = find_best_time;
-    data_transfer_time  = find_best_time;
-    calc_update_best    = find_best_time;
-    calc_update_child   = find_best_time;
-    calc_update_nid     = find_best_time;
-    bld_asso_time       = find_best_time;
-    prune_time          = find_best_time;
-    
+    scv_acs_time        = begin_func_exec - begin_func_exec;
+    calc_olap_time      = scv_acs_time;
+    calc_acc_time       = scv_acs_time;
+    calc_pre_time       = scv_acs_time;
+    ins_upd_time        = scv_acs_time;
+    calc_update_best    = scv_acs_time;
+    calc_update_child   = scv_acs_time;
+    calc_update_nid     = scv_acs_time;
+    bld_assoc_time      = scv_acs_time;
+    prune_time          = scv_acs_time;
+   
     IF(split_criterion = 'infogain') THEN
-        sp_crit = 1;
+        sc_code = 1;
     ELSIF (split_criterion = 'gainratio') THEN
-        sp_crit = 2;
+        sc_code = 2;
     ELSIF (split_criterion = 'gini') THEN
-        sp_crit = 3;
+        sc_code = 3;
     ELSE
         RAISE EXCEPTION '%', 'Invalid split criterion!';
     END IF;
@@ -2285,7 +1783,7 @@ BEGIN
         RAISE INFO 'INPUT TABLE SIZE: %', total_size;
     END IF;
 
-    begin_bld_asso = clock_timestamp();
+    begin_bld_assoc = clock_timestamp();
 
     -- The table of tr_association holds the information of which records are 
     -- used during training for each tree.
@@ -2315,18 +1813,16 @@ BEGIN
         EXECUTE curstmt;    
     END IF;
     
-    bld_asso_time = clock_timestamp() - begin_bld_asso;
+    EXECUTE 'ANALYZE tr_association';
+    bld_assoc_time = clock_timestamp() - begin_bld_assoc;
 
-    -- set the start ID of tree node
-    nid = 1;
-    
     -- generate the root node for all trees.
     -- the generated numbers are the same for the two generate_series
     SELECT MADLIB_SCHEMA.__format
         (
             'INSERT INTO % 
-                (id, tree_location, feature, probability, maxclass,scv, 
-                 live, case_size, parent_id, tid) 
+                (id, tree_location, feature, probability, max_class,scv, 
+                 live, num_of_samples, parent_id, tid) 
             SELECT generate_series(1, %), ARRAY[0], 0, 1, 1, 1, 1, 0, 0, 
                    generate_series(1, %)',
             ARRAY[
@@ -2338,9 +1834,10 @@ BEGIN
     
     EXECUTE curstmt;
     
-    nid             = num_trees + 1;          
+    max_nid         = num_trees;
     location_size   = 0;
-    
+
+
     LOOP
         EXECUTE 'SELECT COUNT(id) FROM ' || result_tree_table_name || 
             ' WHERE live > 0 AND array_upper(tree_location,1)='||
@@ -2360,45 +1857,33 @@ BEGIN
         
         begin_olap_acs = clock_timestamp();
         
-m4_changequote(`>>>', `<<<')
-m4_ifdef(>>>__GREENPLUM__<<<, >>>
-        instance_time = MADLIB_SCHEMA.__generate_training_instance
+        instance_time = MADLIB_SCHEMA.__gen_acc
             (
             training_table_name,
             training_table_meta,
             result_tree_table_name,
             features_per_node,
-            max_split_point,
-            't',                    
+            num_classes,
             verbosity
             );
-<<<, >>>
-        -- postgres does not support OLAP operators
-        instance_time = MADLIB_SCHEMA.__generate_training_instance
-            (
-            training_table_name,
-            training_table_meta,
-            result_tree_table_name,
-            features_per_node,
-            max_split_point,
-            'f',
-            verbosity
-            );
-<<<)
-m4_changequote(>>>`<<<, >>>'<<<)
+
+        IF (h2hmv_routine_id=1) THEN
+            -- For ignore, we need the true size of nodes to handle the
+            -- missing values.
+            TRUNCATE node_size_aux;
+         
+            curstmt = 'INSERT INTO node_size_aux 
+                       SELECT tr.tid, tr.nid, sum(weight) as count
+                       FROM tr_association tr
+                       GROUP BY tr.tid, tr.nid;';
+
+            EXECUTE curstmt;
+        END IF;
 
         calc_pre_time  = calc_pre_time + instance_time.calc_pre_time;
-        calc_acs_time  = calc_acs_time + instance_time.calc_acs_time;
         calc_acc_time  = calc_acc_time + instance_time.calc_acc_time;
         calc_olap_time = calc_olap_time + (clock_timestamp() - begin_olap_acs);
 
-        -- If you want to keep the ACS set, please uncomment the following code.
-         IF (verbosity > 0) THEN
-                 INSERT INTO training_instance_copy
-                 SELECT *, (curr_level) as tree_depth, calc_olap_time as 
-                 acs_time FROM training_instance;
-         END IF;
-        
         curr_level = curr_level + 1;
         
         begin_find_best = clock_timestamp();
@@ -2408,14 +1893,19 @@ m4_changequote(>>>`<<<, >>>'<<<)
                'training_instance',
                confidence_level,
                training_table_meta,
-               sp_crit,
+               sc_code,
                grow_tree,
                'find_best_answer_table',
-               h2hmv_routine_id
+               h2hmv_routine_id,
+               num_classes
                );
+        IF (verbosity > 0) THEN
+            RAISE INFO 'find best time at this level:%', 
+                clock_timestamp() - begin_find_best;
+        END IF;
         grow_tree = grow_tree - 1;
         
-        find_best_time      = find_best_time + 
+        scv_acs_time        = scv_acs_time + 
                               (clock_timestamp() - begin_find_best);
         begin_data_transfer = clock_timestamp();
         begin_update_best   = clock_timestamp();
@@ -2425,15 +1915,15 @@ m4_changequote(>>>`<<<, >>>'<<<)
         SELECT MADLIB_SCHEMA.__format
             (
                 'UPDATE % t 
-                 SET feature = c.feature,
-                     probability = c.probability,
-                     maxclass = c.maxclass,
-                     scv = c.infogain,
-                     ebp_coeff = c.ebp_coeff,
-                     case_size = c.node_size,
-                     live = 0,
-                     is_continuous = c.is_cont_feature,
-                     split_value = c.split_value 
+                 SET feature        = c.feature,
+                     probability    = c.probability,
+                     max_class      = c.max_class,
+                     scv            = c.max_scv,
+                     ebp_coeff      = c.ebp_coeff,
+                     num_of_samples = c.node_size,
+                     live           = 0,
+                     is_cont        = c.is_cont,
+                     split_value    = c.split_value 
                  FROM find_best_answer_table c
                  WHERE t.id=c.node_id AND t.tid=c.tid',
                  ARRAY[
@@ -2443,181 +1933,105 @@ m4_changequote(>>>`<<<, >>>'<<<)
             
         EXECUTE curstmt;
 		
-		-- delete the nodes which is not satified with the specified thresholds
-		-- from the best answer table, so that those nodes will not be grown.
-        curstmt = MADLIB_SCHEMA.__format
-                    (
-                        'DELETE FROM find_best_answer_table 
-                         WHERE  feature = 0     OR
-                                feature IS NULL OR
-                                node_size < %   OR
-                                node_size < %',
-                        ARRAY[
-                            (total_size * node_prune_threshold)::TEXT,
-                            (total_size * node_split_threshold)::TEXT
-                        ]
-                    );
-		EXECUTE curstmt;
-        
         calc_update_best    = calc_update_best + 
                               (clock_timestamp() - begin_update_best);
         begin_update_child  = clock_timestamp();
-        
-        -- generate child nodes for the best splits
-        -- these new created child nodes will be the current leaf nodes 
-        -- for the next level
-        FOR answer IN EXECUTE 
-            'SELECT * FROM find_best_answer_table WHERE live>0' LOOP                            
-            --here insert live determination function 
-            SELECT MADLIB_SCHEMA.__format
-                (
-                    'SELECT tree_location, dp_ids
-                     FROM %
-                     WHERE id = % AND tid = %;',
-                    ARRAY[
-                        result_tree_table_name,
-                        answer.node_id::TEXT,
-                        answer.tid::TEXT
-                    ]
-                ) INTO curstmt;
-            
-            EXECUTE curstmt INTO location, dp_ids;    
 
-            IF (location IS NULL) THEN
-                RAISE EXCEPTION 'tid:%,node_id:%,dpids:%,tree_location should 
-                    not be NULL',answer.tid,answer.node_id, dp_ids;
-            END IF;
-
-            IF (answer.live > 0 and answer.is_cont_feature = 'f') THEN 
-                IF(verbosity > 0) THEN
-                    RAISE INFO 'determine live for discrete';
-                END IF;  
-                
-                -- the length of the array(dp_ids) should be less than the number 
-                -- of discrete features. Otherwise, raise exception, which 
-                -- means there maybe something wrong in the code(such as, the DT_EPSILON in
-                -- the dt.c file is too precise so that we split a node with a zero 
-                -- split criterion value. If it's this case, we need to reduce the precision).
-                PERFORM MADLIB_SCHEMA.__assert
-                    (
-                        coalesce(array_upper(dp_ids, 1), 0) < 
-                        MADLIB_SCHEMA.__get_num_discete_features(training_table_meta),
-                        'the number of parent discrete features('   || 
-                        array_upper(dp_ids, 1)                      ||  
-                        ') is greater than or equal to '            ||
-                        'the number of discrete features('          ||
-                         MADLIB_SCHEMA.__get_num_discete_features
-                            (training_table_meta)                   ||
-                        ')'
-                    );
-                
-                -- add the current feature ID to the array(dp_ids)
-                IF (dp_ids IS NULL) THEN
-                    dp_ids = array[answer.feature];
-                ELSE
-                    dp_ids = dp_ids || answer.feature;
-                END IF;
-
-                -- insert the leftmost child node id and relevant info
-                -- to the asso_aux table, so that we will make use of this 
-                -- info to  update the assigned nid the cases belong to
-                -- the current node whose id is answer.node_id.
-                SELECT MADLIB_SCHEMA.__format
-                    (
-                        'INSERT INTO asso_aux
-                         (nid, fid, lmc_id, svalue, is_cont)
-                         VALUES(%, %, %, NULL, ''f'')',
-                        ARRAY[
-                            answer.node_id::TEXT,
-                            answer.feature::TEXT,
-                            nid::TEXT                        
-                        ]
-                    ) INTO curstmt;
-                
-                EXECUTE curstmt;
-                                                 
-                FOR i IN 1..answer.distinct_features LOOP
-                    temp_location = location;
-                    temp_location[array_upper(temp_location,1)+1] = i;
-                
-                    SELECT MADLIB_SCHEMA.__format
+        curstmt=
+            MADLIB_SCHEMA.__format(
+                   'INSERT INTO %(id, tree_location, feature, probability, 
+                        max_class, scv, live, parent_id, tid, dp_ids)
+                        SELECT %+row, array_append(tree_location, fval),
+                            0, 1, 1, 1, %, ans.node_id, ans.tid, 
+                            CASE when(NOT ans.is_cont) then
+                                array_append( dp_ids, ans.feature)
+                            ELSE
+                                dp_ids
+                            END
+                        FROM % tree,
                         (
-                        'INSERT INTO %(id, tree_location, feature, probability, 
-                            maxclass, scv, live, parent_id, tid, dp_ids) 
-                         VALUES(%, ARRAY[%], 0, 1, 1, 1, %, %, %, ARRAY[%])',
-                         ARRAY[
+                            SELECT  *, 
+                                    row_number() 
+                                    OVER (ORDER BY l.tid, l.node_id, l.fval) AS row
+                            FROM
+                            (
+                                SELECT  *,  
+                                        CASE WHEN (is_cont) THEN
+                                            generate_series(1,2)
+                                        ELSE
+                                            generate_series(1, distinct_features)
+                                        END AS fval 
+                                FROM
+                                find_best_answer_table
+                                WHERE live>0 AND coalesce(feature, 0) <> 0 
+                                      AND node_size >= % AND node_size >= %
+                            ) l
+                        ) ans
+                        WHERE tree.id=ans.node_id and tree.tid=ans.tid;',
+                        ARRAY[
                             result_tree_table_name,
-                            nid::TEXT,
-                            array_to_string(temp_location, ','),
+                            (max_nid)::TEXT,
                             curr_level::TEXT,
-                            answer.node_id::TEXT,
-                            answer.tid::TEXT,
-                            array_to_string(dp_ids, ',')
-                         ]
-                    ) INTO curstmt;
-                    EXECUTE curstmt;        
-                    
-                    nid = nid + 1;                               
-                END LOOP;
-            ELSIF (answer.live > 0 and answer.is_cont_feature = 't') THEN
-                IF(verbosity > 0) THEN
-                    RAISE INFO 'determine live for continuous';
-                END IF;  
-
-                -- insert the leftmost child node id and relevant info
-                -- to the asso_aux table, so that we will make use of this 
-                -- info to  update the assigned nid the cases belong to
-                -- the current node whose id is answer.node_id.
-                SELECT MADLIB_SCHEMA.__format
-                    (
-                        'INSERT INTO asso_aux
-                         (nid, fid, lmc_id, svalue, is_cont)
-                         VALUES(%, %, %, %, ''t'')',
-                        ARRAY[
-                            answer.node_id::TEXT,
-                            answer.feature::TEXT,
-                            nid::TEXT,
-                            answer.split_value::TEXT                        
+                            result_tree_table_name,
+                            (total_size * node_prune_threshold)::TEXT,
+                            (total_size * node_split_threshold)::TEXT                            
                         ]
-                    ) INTO curstmt;
-                
-                EXECUTE curstmt;
-                
-                IF (dp_ids IS NULL) THEN
-                    dp_ids_text = 'NULL'::TEXT;
-                ELSE
-                    dp_ids_text = MADLIB_SCHEMA.__format
-                                    ('ARRAY[%]', array_to_string(dp_ids, ','));
-                END IF;
+                        );
+        IF(verbosity > 0) THEN
+            RAISE INFO 'Generate Child Nodes:%', curstmt;
+        END IF;
 
-                FOR i IN 1..2 LOOP
-                    temp_location = location;
-                    temp_location[array_upper(temp_location,1)+1] = i;
-                    
-                    -- if current best feature is continuous, the child nodes will
-                    -- inherit the dp_ids from its parent
-                    SELECT MADLIB_SCHEMA.__format
-                        (
-                            'INSERT INTO %(id, tree_location, feature, probability, 
-                                 maxclass, scv, live, parent_id, tid, dp_ids) 
-                             VALUES(%, ARRAY[%], 0, 1, 1, 1, %, %, %, %);',
-                             ARRAY[
-                                result_tree_table_name,
-                                nid::TEXT,
-                                array_to_string(temp_location, ','),
-                                curr_level::TEXT,
-                                answer.node_id::TEXT,
-                                answer.tid::TEXT,
-                                dp_ids_text
-                             ]       
-                         ) INTO curstmt;
-                         
-                    EXECUTE curstmt;             
-                    nid = nid + 1; 
-                END LOOP;
-            END IF;    
+    IF (verbosity > 0) THEN
+        RAISE INFO '%', curstmt;
+        FOR tmp IN EXECUTE 'EXPLAIN ANALYZE ' || curstmt LOOP
+            insert into connect_plan(plan) values(tmp);
         END LOOP;
+    ELSE
+        EXECUTE curstmt;
+    END IF;
+        
+        EXECUTE 'SELECT max(id) FROM '||result_tree_table_name INTO max_nid;
 
+        IF(verbosity > 0) THEN
+            RAISE INFO 'Max nid:%, level:%', max_nid, curr_level;
+        END IF;
+
+        -- insert the leftmost child node id and relevant info
+        -- to the assoc_aux table, so that we will make use of this 
+        -- info to  update the assigned nid the cases belong to
+        -- the current node whose id is answer.node_id.
+        SELECT MADLIB_SCHEMA.__format
+            (
+                'INSERT INTO assoc_aux
+                 (nid, fid, lmc_id, svalue, is_cont)
+                    SELECT t.id, t.feature, min(l.id), 
+                            t.split_value, t.is_cont
+                    FROM
+                        (SELECT id, parent_id 
+                        FROM % 
+                        WHERE array_upper(tree_location,1)=%) l,
+                        % t
+                    WHERE l.parent_id=t.id
+                    GROUP BY t.id, t.feature, t.split_value, t.is_cont;',
+                ARRAY[
+                    result_tree_table_name,
+                    curr_level::TEXT,
+                    result_tree_table_name
+                ]
+            ) INTO curstmt;
+
+        IF(verbosity > 0) THEN
+            RAISE INFO 'Update lmc_child Info:%', curstmt;
+        END IF;
+
+    IF (verbosity > 0) THEN
+        RAISE INFO '%', curstmt;
+        FOR tmp IN EXECUTE 'EXPLAIN ANALYZE ' || curstmt LOOP
+            insert into connect_plan(plan) values(tmp);
+        END LOOP;
+    ELSE
+        EXECUTE curstmt;
+    END IF;
         -- delete the unused nodes on the previous level
         -- delete those nodes with a size less than node_prune_threshold
         -- node_prune_threshold will not apply to root node, 
@@ -2626,7 +2040,7 @@ m4_changequote(>>>`<<<, >>>'<<<)
             curstmt = MADLIB_SCHEMA.__format
                         (
                             'DELETE FROM % t 
-                             WHERE t.case_size < % OR live = %;',
+                             WHERE t.num_of_samples < % OR live = %;',
                             ARRAY[
                                 result_tree_table_name::TEXT,
                                 (total_size * node_prune_threshold)::TEXT,
@@ -2645,27 +2059,34 @@ m4_changequote(>>>`<<<, >>>'<<<)
                 'UPDATE tr_association s
                 SET nid = au.lmc_id - 1 +
                     CASE WHEN (au.is_cont) THEN
-                            CASE WHEN (svalue < t.fv[au.fid]) THEN
+                            CASE WHEN (svalue < t.fvals[au.fid]) THEN
                                 2
                             ELSE
                                 1
                             END
                     ELSE
-                        t.fv[au.fid]
+                        t.fvals[au.fid]
                     END
-                FROM (SELECT id, % as fv FROM %) t, asso_aux au
+                FROM % t, assoc_aux au
                 WHERE s.nid = au.nid and t.id = s.id;',
                 ARRAY[
-                    MADLIB_SCHEMA.__get_feature_name_list(training_table_meta),
                     training_table_name
                 ]
             ) INTO curstmt;
             
-        EXECUTE curstmt;  
-        EXECUTE 'TRUNCATE asso_aux';
+    IF (verbosity > 0) THEN
+        RAISE INFO '%', curstmt;
+        FOR tmp IN EXECUTE 'EXPLAIN ANALYZE ' || curstmt LOOP
+            insert into connect_plan(plan) values(tmp);
+        END LOOP;
+    ELSE
+        EXECUTE curstmt;
+    END IF;
+
+        EXECUTE 'TRUNCATE assoc_aux';
         calc_update_nid = calc_update_nid + (clock_timestamp() - begin_update_nid);
         
-        data_transfer_time = data_transfer_time + 
+        ins_upd_time = ins_upd_time + 
             (clock_timestamp() - begin_data_transfer);             
         IF(verbosity > 0) THEN
             RAISE INFO 'computation time in this level:%',
@@ -2692,14 +2113,11 @@ m4_changequote(>>>`<<<, >>>'<<<)
     prune_time = clock_timestamp() - begin_prune;
     
     IF(verbosity > 0) THEN
-        RAISE INFO 'total of find best time: %', find_best_time;
-        RAISE INFO 'total of olap query/windows func time: %', calc_olap_time;
-        RAISE INFO 'total of calculating acc func time: %', calc_acc_time;
-        RAISE INFO 'total of calculating acs func time: %', calc_acs_time;
-        RAISE INFO 'Insert/update operation time: %', data_transfer_time;
-        RAISE INFO 'total of pruning time: %', prune_time;
-        RAISE INFO 'total of __train_tree time: %', 
-            clock_timestamp() - begin_func_exec;        
+        RAISE INFO 'time of finding best and calculating ACS: %', scv_acs_time;
+        RAISE INFO 'time of calculating ACC: %', calc_acc_time;
+        RAISE INFO 'time of Insert/update operation: %', ins_upd_time;
+        RAISE INFO 'time of pruning: %', prune_time;
+        RAISE INFO 'time of training: %', clock_timestamp() - begin_func_exec;        
     END IF;
     
     SELECT MADLIB_SCHEMA.__format
@@ -2716,15 +2134,13 @@ m4_changequote(>>>`<<<, >>>'<<<)
     ret.features_per_node   = features_per_node;            
     ret.num_of_cases        = total_size;
     ret.max_tree_depth      = curr_level - 1;
-    ret.calc_acs_time       = calc_olap_time;
-    ret.acc_to_acs_time     = calc_acs_time;
     ret.calc_acc_time       = calc_acc_time;
     ret.calc_pre_time       = calc_pre_time;
-    ret.update_time         = data_transfer_time;
+    ret.update_time         = ins_upd_time;
     ret.update_best         = calc_update_best;
     ret.update_child        = calc_update_child;
     ret.update_nid          = calc_update_nid;
-    ret.find_best_time      = find_best_time;   
+    ret.scv_acs_time        = scv_acs_time;   
     ret.prune_time          = prune_time;
     
     RETURN ret;
@@ -2733,7 +2149,7 @@ $$ LANGUAGE PLPGSQL;
 
 
 /*
- * @brief This is a internal function for displaying one tree node in human  
+ * @brief This is an internal function for displaying one tree node in human  
  *        readable format. It is the step function of aggregation named 
  *        __display_tree_aggr.
  *
@@ -2743,13 +2159,13 @@ $$ LANGUAGE PLPGSQL;
  * @param is_cont   Whether the feature used to split is continuous. 
  * @param feat_name The name of the feature used to split.
  * @param curr_val  The value of the splitting feature for this node.
- * @param sp_val    For continuous feature, it specifies the split value. 
+ * @param split_value    For continuous feature, it specifies the split value. 
  *                  Otherwise, it is of no meaning.
  * @param max_prob  For those elements in this node, the probability that
  *                  an element belongs to the max_class.
  * @param max_class The class ID with the largest number of elements 
  *                  for those elements in this node.
- * @param case_size Total count of elements in this node. 
+ * @param num_of_samples Total count of samples in this node. 
  *
  * @return It returns the text containing the information of human  
  *         readable information for trees.
@@ -2757,15 +2173,15 @@ $$ LANGUAGE PLPGSQL;
  */
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__display_node_sfunc
     (
-    state       TEXT,
-    depth       INT,
-    is_cont     BOOLEAN,
-    feat_name   TEXT,
-    curr_val    TEXT,
-    sp_val      FLOAT8,
-    max_prob    FLOAT8,
-    max_class   TEXT,
-    case_size   INT
+    state           TEXT,
+    depth           INT,
+    is_cont         BOOLEAN,
+    feat_name       TEXT,
+    curr_val        TEXT,
+    split_value     FLOAT8,
+    max_prob        FLOAT8,
+    max_class       TEXT,
+    num_of_samples  INT
     ) 
 RETURNS TEXT AS $$ 
 DECLARE
@@ -2788,7 +2204,7 @@ BEGIN
             ELSE
                 ret = ret || ' > ';
             END IF;
-            ret = ret||coalesce(sp_val,0)||' ';
+            ret = ret||coalesce(split_value,0)||' ';
         ELSE
             ret = ret||' = '||coalesce(curr_val,'null')||' ';
         END IF;
@@ -2800,7 +2216,7 @@ BEGIN
           ' : class('                       ||  
           coalesce(max_class,null)          || 
           ')   num_elements('               || 
-          coalesce(case_size,0)              || 
+          coalesce(num_of_samples,0)        || 
           ')  predict_prob('                ||
           coalesce(max_prob,0)              ||
           ')';
@@ -2827,7 +2243,7 @@ DROP AGGREGATE IF EXISTS MADLIB_SCHEMA.__display_tree_aggr
     FLOAT8,     -- split value
     FLOAT8,     -- max_probability
     TEXT,       -- max_class
-    INT         -- case_size
+    INT         -- num_of_samples
     ) CASCADE;
 CREATE 
 m4_ifdef(`__GREENPLUM__', m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `ORDERED'))
@@ -2840,7 +2256,7 @@ AGGREGATE MADLIB_SCHEMA.__display_tree_aggr
     FLOAT8,     -- split value
     FLOAT8,     -- max_probability
     TEXT,       -- max_class
-    INT         -- case_size
+    INT         -- num_of_samples
     ) 
 (
   SFUNC=MADLIB_SCHEMA.__display_node_sfunc,
@@ -2894,8 +2310,8 @@ BEGIN
         id                      INT,
         tree_location           INT[],
         probability             FLOAT8, 
-        maxclass                TEXT,
-        case_size               INT,
+        max_class               TEXT,
+        num_of_samples          INT,
         parent_id               INT,
         curr_value              TEXT,
         parent_feature_id       INT,
@@ -2912,12 +2328,12 @@ BEGIN
         FROM 
         (SELECT * FROM
             (SELECT t1.tid,t1.id, t1.tree_location,
-            t1.probability,t1.maxclass::TEXT,
-            t1.case_size,t1.parent_id, 
+            t1.probability,t1.max_class::TEXT,
+            t1.num_of_samples,t1.parent_id, 
             t1.tree_location[array_upper(t1.tree_location,1)]::TEXT 
                 as curr_value, 
             t2.feature as parent_feature_id, 
-            t2.is_continuous as is_parent_feature_cont, 
+            t2.is_cont as is_parent_feature_cont, 
             t2.split_value as parent_split_value 
             FROM % t1 LEFT JOIN % t2 ON 
             (t1.parent_id = t2.id AND 
@@ -2956,12 +2372,11 @@ BEGIN
         -- Convert back for the class column.
         SELECT MADLIB_SCHEMA.__format(
             'UPDATE auxiliary_tree_display n 
-             SET maxclass = MADLIB_SCHEMA.__to_char(m.%) 
+             SET max_class = MADLIB_SCHEMA.__to_char(m.fval) 
              FROM % m 
-             WHERE m.key = n.maxclass::INT
+             WHERE m.code = n.max_class::INT
             ',
             ARRAY[
-                result_rec.column_name,
                 table_name
             ]
             )
@@ -2973,6 +2388,7 @@ BEGIN
     SELECT MADLIB_SCHEMA.__format
         (
             'SELECT 
+		id,
                 column_name,
                 MADLIB_SCHEMA.__regclass_to_text(table_oid) as table_name 
              FROM % 
@@ -2985,19 +2401,18 @@ BEGIN
     
     -- Convert back for discrete features.
     FOR result_rec IN EXECUTE (curr_stmt) LOOP
-        feature_name = result_rec.column_name;
-        table_name = result_rec.table_name;
         SELECT MADLIB_SCHEMA.__format(
             'UPDATE auxiliary_tree_display n 
-             SET curr_value = MADLIB_SCHEMA.__to_char(m.%) 
+             SET curr_value = MADLIB_SCHEMA.__to_char(m.fval) 
              FROM % m 
-             WHERE m.key = n.curr_value::INT 
-             AND n.parent_feature_name = %
+             WHERE m.code::INT = n.curr_value::INT AND
+		   m.fid = % 		      AND 
+                   n.parent_feature_name = %
             ',
             ARRAY[
-                feature_name,
-                table_name,
-                quote_literal(feature_name)
+                result_rec.table_name,
+		result_rec.id::TEXT,
+                quote_literal(result_rec.column_name)
             ]
             )
         INTO curr_stmt;  
@@ -3015,8 +2430,8 @@ BEGIN
                 curr_value,
                 parent_split_value,
                 probability,
-                maxclass,
-                case_size 
+                max_class,
+                num_of_samples 
                 order by tree_location) AS disp_str
          FROM auxiliary_tree_display';
 
@@ -3046,13 +2461,14 @@ END $$ LANGUAGE PLPGSQL;
 
 /*
  * @brief This is an internal function for displaying the tree in human readable
- *        format.It use the depth-first strategy to traverse a tree and print 
- *        values.
+ *        format. It uses the depth-first strategy to traverse a tree and print 
+ *        values. This function is used on databases, e.g. PG 8.4, that do not 
+ *        support ordered aggregate.
  *
  * @param tree_table      The full name of the tree table. 
- * @param id              The id of current node. This node and all of its  
+ * @param id              The ID of current node. This node and all of its  
  *                        children are displayed.
- * @param feature_id      The ID of a feature, which was used to split in the 
+ * @param feature_id      The ID of a feature, which is used to split in the 
  *                        parent of current node.
  * @param depth           The depth of current node.
  * @param is_cont         It specifies whether the feature denoted by 'feature_id'
@@ -3085,15 +2501,15 @@ DECLARE
     ret                     TEXT := '';
     tree_location           INT[];
     feature                 INT;
-    maxclass                INT;
-    case_size               INT;
-    is_continuous           BOOLEAN;
+    max_class               INT;
+    num_of_samples          INT;
+    is_cont                 BOOLEAN;
     temp_split_value        FLOAT;
     index                   INT;
     curr_value              INT;
     probability             FLOAT;
     curstmt                 TEXT;
-    child_nid		    INT;
+    child_nid               INT;
 BEGIN
     IF (id IS NULL OR id <= 0) THEN
         RETURN ret;
@@ -3101,8 +2517,8 @@ BEGIN
 
     SELECT MADLIB_SCHEMA.__format
             (
-                'SELECT tree_location, feature, is_continuous, 
-                        split_value, maxclass,case_size,probability
+                'SELECT tree_location, feature, is_cont, 
+                        split_value, max_class,num_of_samples,probability
                  FROM %
                  WHERE id = % AND tid=%',
                  ARRAY[
@@ -3113,8 +2529,8 @@ BEGIN
              )
     INTO curstmt;
     
-    EXECUTE curstmt INTO tree_location, feature, is_continuous, 
-                         temp_split_value, maxclass, case_size, probability;  
+    EXECUTE curstmt INTO tree_location, feature, is_cont, 
+                         temp_split_value, max_class, num_of_samples, probability;  
 
     curr_value = tree_location[array_upper(tree_location,1)];
 
@@ -3148,9 +2564,9 @@ BEGIN
 
     ret = ret                                                       || 
           ' : class('                                               ||  
-          MADLIB_SCHEMA.__get_class_value(maxclass,metatable_name)  || 
+          MADLIB_SCHEMA.__get_class_value(max_class,metatable_name)  || 
           ')   num_elements('                                       || 
-          case_size                                                 || 
+          num_of_samples                                                 || 
           ')  predict_prob('                                        ||
           probability                                               ||
           ')';
@@ -3181,7 +2597,7 @@ BEGIN
                         child_nid,
                         feature,
                         depth + 1,
-                        is_continuous,
+                        is_cont,
                         temp_split_value,
                         metatable_name,
                         max_depth,
@@ -3195,7 +2611,7 @@ END $$ LANGUAGE PLPGSQL;
 /*
  * @brief Display the trained model with human readable format. It use the 
  *        recursive algorithm, which is slower than the version with 
- *        ordered aggregate. We only use it when ordered aggregate is NA.
+ *        ordered aggregate. We only use it when ordered aggregate is unavailable.
  *
  * @param tree_table  The full name of the tree table. 
  * @param tree_id     The array contains the IDs of the trees to be displayed.
@@ -3287,8 +2703,8 @@ $$ LANGUAGE PLPGSQL;
 
 /*
  * @brief An internal classification function. It classifies with all trees at 
- *        a time.It is faster than the serial version for medium/small data sets 
- *        since gpdb's performance is not good for small data sets.
+ *        the same time. For medium/small data sets, tests shows that it is more
+ *        efficient than the serial classification function. 
  *
  * @param classification_table_name  The full name of the table containing the 
  *                                   classification set.
@@ -3377,14 +2793,14 @@ BEGIN
     END IF;        
     
     /*
-        The table of classified_instance_ping and classified_instance_pong are
-        auxiliary tables used during the classification process.
-        For each record, these tables tell us which node it belongs to. They also
-        hold the information of class and probability.
-        We use transfer data between these two tables rather than update a single
-        table during the classification process. We find the operation of update
-        is quite expensive.
-    */
+     *  The table of classified_instance_ping and classified_instance_pong are
+     *  auxiliary tables used during the classification process.
+     *  For each record, these tables tell us which node it belongs to. They also
+     *  hold the information of class and probability.
+     *  We use transfer data between these two tables rather than update a single
+     *  table during the classification process. We find the operation of update
+     *  is quite expensive.
+     */
     DROP TABLE IF EXISTS classified_instance_ping;
     CREATE TEMP TABLE classified_instance_ping
     (
@@ -3465,35 +2881,34 @@ BEGIN
         SELECT MADLIB_SCHEMA.__format(
             'INSERT INTO %
             SELECT pt.tid, pt.id, 
-            CASE WHEN (is_continuous) THEN 
+            CASE WHEN (is_cont) THEN 
                     CASE WHEN (gt.lmc_nid IS NULL) THEN
                         0
                     ELSE
                         gt.lmc_nid + 
-                        float8lt(gt.split_value, farray[gt.feature])::INT4 + 1 -
+                        float8lt(gt.split_value, fvals[gt.feature])::INT4 + 1 -
                         gt.lmc_fval
                     END
                 ELSE 
                     CASE WHEN (gt.lmc_nid IS NULL) THEN
                         0
                     ELSE                    
-                        gt.lmc_nid + farray[gt.feature] - gt.lmc_fval
+                        gt.lmc_nid + fvals[gt.feature] - gt.lmc_fval
                     END
                 END as newjump,
-            gt.maxclass, gt.probability, gt.parent_id, gt.id 
+            gt.max_class, gt.probability, gt.parent_id, gt.id 
             FROM 
-            (SELECT t1.tid, t1.id, t1.jump, % as farray  
+            (SELECT t1.tid, t1.id, t1.jump, fvals  
                 FROM % t1 
                 LEFT JOIN % t2 
                 ON t1.id = t2.id)  AS pt, 
-            (SELECT tid,lmc_nid, lmc_fval, maxclass,feature, probability, 
-                    parent_id, id, is_continuous, split_value
+            (SELECT tid,lmc_nid, lmc_fval, max_class,feature, probability, 
+                    parent_id, id, is_cont, split_value
                 FROM % 
                 WHERE array_upper(tree_location,1) = %) AS gt 
             WHERE pt.jump = gt.id AND pt.tid=gt.tid;',
             ARRAY[
                 table_names[table_pick],
-                MADLIB_SCHEMA.__get_feature_name_list(metatable_name),
                 table_names[(table_pick) % 2 + 1],
                 encoded_table_name,
                 tree_table_name,
@@ -3502,10 +2917,11 @@ BEGIN
             )
         INTO curstmt;     
         EXECUTE curstmt;
-
-        -- if the node (whose id is "jump") doesn't exist, 
-        -- then insert them into result table 
-        -- (be classified to max_class of its corrsponding node)
+        /*
+         *  if the node (whose id is "jump") doesn't exist, 
+         *  then insert them into result table 
+         *  (be classified to max_class of its corrsponding node)
+         */
         FOR tree_id IN EXECUTE 'SELECT DISTINCT tid FROM '||tree_table_name LOOP
             SELECT MADLIB_SCHEMA.__format(
                 'INSERT INTO %(tid,id, jump, class, prob, parent_id, leaf_id) 
@@ -3556,9 +2972,9 @@ $$ LANGUAGE PLPGSQL;
 
 
 /*
- * @brief An internal classification function. It classifies with one tree after
- *        another. It is faster than the parallel version for huge data sets   
- *        since some operation within gpdb is not linear for huge data sets.
+ * @brief An internal classification function. It classifies with one tree 
+ *        after another. For large data sets, tests shows that it is more
+ *        efficient than the parallel classification function.   
  *
  * @param classification_table_name  The full name of the table containing the 
  *                                   classification set.
@@ -3637,9 +3053,9 @@ BEGIN
             
     EXECUTE 'DROP TABLE IF EXISTS ' || encoded_table_name || ' CASCADE';
                                  
-    SELECT MADLIB_SCHEMA.__get_metatable_name(tree_table_name) INTO metatable_name;
+    metatable_name   = MADLIB_SCHEMA.__get_metatable_name(tree_table_name);
 
-    SELECT MADLIB_SCHEMA.__get_routine_id(tree_table_name) INTO h2hmv_routine_id;
+    h2hmv_routine_id = MADLIB_SCHEMA.__get_routine_id(tree_table_name);
     
     PERFORM MADLIB_SCHEMA.__encode_tabular_table
         (
@@ -3655,14 +3071,14 @@ BEGIN
     END IF;        
     
     /*
-        The table of classified_instance_ping and classified_instance_pong are
-        auxiliary tables used during the classification process.
-        For each record, these tables tell us which node it belongs to. They also
-        hold the information of class and probability.
-        We use transfer data between these two tables rather than update a single
-        table during the classification process. We find the operation of update
-        is quite expensive.
-    */    
+     *  The table of classified_instance_ping and classified_instance_pong are
+     *  auxiliary tables used during the classification process.
+     *  For each record, these tables tell us which node it belongs to. They also
+     *  hold the information of class and probability.
+     *  We use transfer data between these two tables rather than update a single
+     *  table during the classification process. We find the operation of update
+     *  is quite expensive.
+     */    
     DROP TABLE IF EXISTS classified_instance_ping;
     CREATE TEMP TABLE classified_instance_ping
     (
@@ -3750,39 +3166,38 @@ BEGIN
             SELECT MADLIB_SCHEMA.__format(
                 'INSERT INTO %
                 SELECT pt.id, 
-                CASE WHEN (is_continuous) THEN 
+                CASE WHEN (is_cont) THEN 
                         CASE WHEN (gt.lmc_nid IS NULL) THEN
                             0
                         ELSE
                             gt.lmc_nid + 
-                            float8lt(gt.split_value, farray[gt.feature])::INT4 
+                            float8lt(gt.split_value, fvals[gt.feature])::INT4 
                             + 1 - gt.lmc_fval
                         END
                     ELSE 
                         CASE WHEN (gt.lmc_nid IS NULL) THEN
                             0
                         ELSE                    
-                            gt.lmc_nid + farray[gt.feature] - gt.lmc_fval
+                            gt.lmc_nid + fvals[gt.feature] - gt.lmc_fval
                         END
                     END as newjump,
-                gt.maxclass, gt.probability, gt.parent_id, gt.id 
+                gt.max_class, gt.probability, gt.parent_id, gt.id 
                 FROM 
                 (
-                    SELECT t1.id, t1.jump, % as farray  
+                    SELECT t1.id, t1.jump, fvals  
                     FROM % t1 
                     LEFT JOIN % t2 
                     ON t1.id = t2.id
                 ) AS pt,
                 (
-                    SELECT  lmc_nid, lmc_fval, maxclass,feature, probability, 
-                            parent_id, id, is_continuous, split_value
+                    SELECT  lmc_nid, lmc_fval, max_class, feature, probability, 
+                            parent_id, id, is_cont, split_value
                     FROM % 
                     WHERE array_upper(tree_location,1) = % AND tid=%
                 ) AS gt
                 WHERE pt.jump = gt.id;',
                 ARRAY[
                     table_names[table_pick],
-                    MADLIB_SCHEMA.__get_feature_name_list(metatable_name),
                     table_names[(table_pick) % 2 + 1],
                     encoded_table_name,
                     tree_table_name,
@@ -3793,9 +3208,11 @@ BEGIN
             INTO curstmt;     
             EXECUTE curstmt;
     
-            -- if the node (whose id is "jump") doesn't exist, 
-            -- then insert them into result table 
-            -- (be classified to max_class of its corrsponding node)
+            /*
+             *  if the node (whose id is "jump") doesn't exist, 
+             *  then insert them into result table 
+             *  (be classified to max_class of its corrsponding node)
+             */
             SELECT MADLIB_SCHEMA.__format(
                 'INSERT INTO %(tid,id, jump, class, prob, parent_id, leaf_id) 
                  SELECT '||tree_id||',id, 0, class, prob, parent_id, leaf_id
@@ -3859,7 +3276,7 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__treemodel_score
     ) 
 RETURNS FLOAT AS $$
 DECLARE
-    result_table_name       TEXT;
+    result_table_name           TEXT;
     result_table_name_final	TEXT;
     id_col_name   	      	TEXT  := 'id';
     class_col_name      	TEXT  := 'class';
@@ -3867,7 +3284,7 @@ DECLARE
     num_of_row          	FLOAT := 0.0;
     mis_of_row          	FLOAT := 0.0;
     encoded_table_name  	TEXT  := '';
-    table_names             TEXT[];
+    table_names                 TEXT[];
 BEGIN
 
     IF (verbosity > 0) THEN
@@ -3940,14 +3357,18 @@ BEGIN
     INTO curstmt;
     
     EXECUTE curstmt INTO num_of_row;
-    
+
     SELECT MADLIB_SCHEMA.__format
         (
-        'SELECT count(b.id) FROM % a, % b WHERE a.%=b.id and a.%<>b.class',
-        encoded_table_name,
-        result_table_name_final,
-        id_col_name,
-        class_col_name
+        'SELECT count(t2.id) 
+	 FROM % t1, % t2 
+         WHERE t1.% = t2.id AND t1.% <> t2.class',
+        ARRAY[
+            encoded_table_name,
+            result_table_name_final,
+            id_col_name,
+            class_col_name
+        ]
         ) 
     INTO curstmt;
      
@@ -4016,193 +3437,3 @@ BEGIN
     RETURN 't';    
 END
 $$ LANGUAGE PLPGSQL;
-
-
-/*
- * @brief Retrieve the specified number of unique features for a node.
- *        Discrete features used by ancestor nodes will be excluded.
- *        If the number of remaining features is less or equal than the
- *        requested number of features, then all the remaining features
- *        will be returned. Otherwise, we will sample the requested 
- *        number of features from the remaining features.
- *
- * @param num_req_features  The number of requested features.
- * @param num_features      The total number of features.
- * @param nid               The ID of the node for which the
- *                          features are sampled.
- * @param dp_fids           The IDs of the discrete features
- *                          used by the ancestors.
- *
- * @return An array containing all the IDs of chosen features.
- *
- */
-CREATE OR REPLACE FUNCTION 
-MADLIB_SCHEMA.__dt_get_node_split_fids(INT4, INT4, INT4, INT4[])
-RETURNS INT[]
-AS 'MODULE_PATHNAME', 'dt_get_node_split_fids'
-LANGUAGE C VOLATILE;
-
-
-/*
- * @brief The function samples a set of integer values between low and high.
- *
- * @param sample_size     The number of records to be sampled_rd.
- * @param low             The low limit of sampled valuesn_fid.
- * @param high            The high limit of sampled valuesnid.
- *
- * @return A set of integer values sampled randomly between [low, high].
- *
- */
-DROP FUNCTION IF EXISTS MADLIB_SCHEMA.__sample_within_range
-    (
-    BIGINT,
-    BIGINT,
-    BIGINT
-    )CASCADE;
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__sample_within_range
-    (
-    sample_size     BIGINT,
-    low             BIGINT,
-    high            BIGINT
-    ) 
-RETURNS SETOF BIGINT  
-AS 'MODULE_PATHNAME', 'dt_sample_within_range'
-LANGUAGE C STRICT VOLATILE;
-
-
-/*
- * @brief The function samples with replacement from source table and store
- *        the results to target table.
- * 
- *        In this function, we firstly calculate how many samples should be
- *        generated in each segment. Then, we let those segments sample with
- *        replacement between the maximum ID and minimum ID of the source table 
- *        in parallel and assign samples to different trees. 
- *
- *        If there are gaps in the ID column of the source table, we sample
- *        extra records in proportion to the number of gaps. At last, we remove
- *        these invalid samples with an inner join operation with the source
- *        table. Since we target big data, this strategy works quite well.
- *
- * @param num_of_tree     The number of trees to be trained.
- * @param size_per_tree   The number of records to be sampled for each tree.
- * @param src_table       The name of the table to be sampled from.
- * @param target_table    The name of the table used to store the results.
- *
- */
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__sample_with_replacement
-    ( 
-    num_of_tree     INT,
-    size_per_tree   INT, 
-    src_table       TEXT,
-    target_table    TEXT
-    ) 
-RETURNS VOID AS $$
-DECLARE
-    segment_num     INT;
-    sample_per_seg  INT;
-    sample_ratio    FLOAT8;
-    record_num      FLOAT8;
-    min_id          INT;
-    max_id          INT;
-    range           FLOAT8;
-    stmt            TEXT;
-BEGIN
-
-m4_changequote(`>>>', `<<<')
-m4_ifdef(>>>__GREENPLUM__<<<, >>>
-    -- get the segment number
-    SELECT COUNT(distinct content) FROM gp_segment_configuration 
-        WHERE content<>-1 INTO segment_num;
-<<<, >>>
-    -- fix the segment number to 1 for PG
-    segment_num = 1;
-<<<)
-m4_changequote(>>>`<<<, >>>'<<<)
-
-
-    DROP TABLE IF EXISTS auxiliary_segment_table;
-    CREATE TEMP TABLE auxiliary_segment_table
-    (
-        segment_id  INT   
-    ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY(segment_id)');
-
-    -- Insert segment_num of records distributed by segment id
-    EXECUTE 'INSERT INTO auxiliary_segment_table 
-        SELECT generate_series(1,'||segment_num||');';
-
-    EXECUTE 'SELECT max(id),min(id), count(DISTINCT id) as record_num 
-        FROM '||src_table||';' INTO max_id,min_id,record_num;
-    range=max_id-min_id+1;
-
-    -- compute the sample ratio
-    sample_ratio= range/record_num;
-
-    -- compute how many records should be sampled by each segment
-    sample_per_seg=((sample_ratio*num_of_tree*size_per_tree)/segment_num)::INT;
-    
-    DROP TABLE IF EXISTS sample_result_temp;
-    CREATE TEMP TABLE sample_result_temp
-    (
-        sample_id   SERIAL,
-        record_id   INT
-    ) m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY(record_id)');
-
-    RAISE INFO 'sample_per_seg:%, sample_ratio:%', sample_per_seg, sample_ratio;
-    -- sample in parallel by all segments
-    stmt= 'INSERT INTO sample_result_temp(record_id) 
-        SELECT MADLIB_SCHEMA.__sample_within_range('||sample_per_seg||','||min_id
-        ||','||max_id||') FROM auxiliary_segment_table;';
-
-    EXECUTE stmt;
-
-    -- remove those invalid samples with join operation
-    -- add the weight field
-    EXECUTE 'DROP TABLE IF EXISTS '||target_table;
-	stmt = MADLIB_SCHEMA.__format
-			(
-				E'CREATE TEMP TABLE %(id, tid, nid, weight) AS
-				  SELECT record_id, 
-				        ((sample_id - 1)\\% % + 1)::INT AS tid, 
-				        ((sample_id - 1)\\% % + 1)::INT AS nid, 
-				        count(*) AS weight
-				  FROM sample_result_temp t, % k
-				  WHERE t.record_id=k.id
-				  GROUP BY record_id, tid, nid
-				  m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY(id)');',
-				ARRAY[
-					target_table,
-					num_of_tree::TEXT,
-					num_of_tree::TEXT,
-					src_table
-				]
-			);
-	EXECUTE stmt;
-END
-$$ LANGUAGE PLPGSQL VOLATILE;
-
-
-CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dt_acs_count_sfunc
-    (
-    count_array         BIGINT[],
-    num_of_class        INT,
-    count               BIGINT,
-    class               INT
-    ) 
-RETURNS BIGINT[]  
-AS 'MODULE_PATHNAME', 'dt_acs_count_sfunc'
-LANGUAGE C VOLATILE;
-
-
-CREATE
-AGGREGATE MADLIB_SCHEMA.__dt_acs_count_aggr
-    (
-    INT,
-    BIGINT,
-    INT
-    ) 
-(
-  SFUNC=MADLIB_SCHEMA.__dt_acs_count_sfunc,
-  m4_ifdef(`__GREENPLUM__', `prefunc=MADLIB_SCHEMA.__rep_aggr_class_count_prefunc,')
-  STYPE=BIGINT[]
-);
