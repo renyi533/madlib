@@ -4180,3 +4180,29 @@ m4_changequote(>>>`<<<, >>>'<<<)
 	EXECUTE stmt;
 END
 $$ LANGUAGE PLPGSQL VOLATILE;
+
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__dt_acs_count_sfunc
+    (
+    count_array         BIGINT[],
+    num_of_class        INT,
+    count               BIGINT,
+    class               INT
+    ) 
+RETURNS BIGINT[]  
+AS 'MODULE_PATHNAME', 'dt_acs_count_sfunc'
+LANGUAGE C VOLATILE;
+
+
+CREATE
+AGGREGATE MADLIB_SCHEMA.__dt_acs_count_aggr
+    (
+    INT,
+    BIGINT,
+    INT
+    ) 
+(
+  SFUNC=MADLIB_SCHEMA.__dt_acs_count_sfunc,
+  m4_ifdef(`__GREENPLUM__', `prefunc=MADLIB_SCHEMA.__rep_aggr_class_count_prefunc,')
+  STYPE=BIGINT[]
+);

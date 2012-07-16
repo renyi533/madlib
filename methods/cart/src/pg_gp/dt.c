@@ -26,7 +26,7 @@
 #ifndef NO_PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
 #endif
-/*#define __DT_SHOW_DEBUG_INFO__*/
+#define __DT_SHOW_DEBUG_INFO__
 #ifdef __DT_SHOW_DEBUG_INFO__
 #define dtelog(...) elog(__VA_ARGS__)
 #else
@@ -2165,4 +2165,122 @@ Datum table_exists(PG_FUNCTION_ARGS)
     PG_RETURN_BOOL(OidIsValid(relid));
 }
 PG_FUNCTION_INFO_V1(table_exists);
+
+
+/*
+ * @brief The step function for generating the acc counts.
+ *
+ * @param class_count_array     The array used to store the count information.
+ * @param max_num_of_classes    The total number of distinct class values.
+ * @param count                 The count value to be accumulated.
+ * @param class                 The current class value.
+ *
+ * @return An updated state array.
+ *
+ */
+Datum
+dt_acs_count_sfunc
+	(
+	PG_FUNCTION_ARGS
+	)
+{
+    ArrayType *pg_count_array    = NULL;
+    int array_dim                = 0;
+    int *p_array_dim             = NULL;
+    int array_length             = 0;
+    int64 *count_array           = NULL;
+    int max_num_of_classes  	 = PG_GETARG_INT32(1);
+    int64  count                 = PG_ARGISNULL(2)?0:PG_GETARG_INT64(2);
+    int    class                 = PG_ARGISNULL(3)?0:PG_GETARG_INT32(3);
+    bool rebuild_array     		 = false;
+
+    dtelog(WARNING, "max_num_of_classes:%d, count:%d, class:%d",
+            max_num_of_classes, count, class);
+    dt_check_error_value
+		(
+			max_num_of_classes >= 2,
+			"invalid value: %d. "
+			"The number of classes must be greater than or equal to 2",
+			max_num_of_classes
+		);
+
+    dt_check_error_value
+		(
+			class >= 0 && class <= max_num_of_classes,
+			"invalid real class value: %d. "
+			"It must be in range from 0 to the number of classes",
+			class
+		);
+
+    /* test if the first argument (class count array) is null */
+    if (PG_ARGISNULL(0))
+    {
+    	/*
+    	 * We assume the maximum number of classes is limited (up to millions),
+    	 * so that the allocated array won't break our memory limitation.
+    	 */
+        dtelog(WARNING, "null internal state, new array here");
+        count_array 	 = palloc0(sizeof(int64) * (max_num_of_classes + 1));
+        array_length 	 = max_num_of_classes + 1;
+        rebuild_array 	 = true;
+
+    }
+    else
+    {
+        if (fcinfo->context && IsA(fcinfo->context, AggState))
+            pg_count_array = PG_GETARG_ARRAYTYPE_P(0);
+        else
+            pg_count_array = PG_GETARG_ARRAYTYPE_P_COPY(0);
+        
+        dt_check_error
+    		(
+    			pg_count_array,
+    			"invalid aggregation state array"
+    		);
+
+        array_dim = ARR_NDIM(pg_count_array);
+
+        dt_check_error_value
+    		(
+    			array_dim == 1,
+    			"invalid array dimension: %d. "
+    			"The dimension of class count array must be equal to 1",
+    			array_dim
+    		);
+
+        p_array_dim         = ARR_DIMS(pg_count_array);
+        array_length        = ArrayGetNItems(array_dim,p_array_dim);
+        count_array    		= (int64 *)ARR_DATA_PTR(pg_count_array);
+
+        dt_check_error_value
+    		(
+    			array_length == max_num_of_classes + 1,
+    			"invalid array length: %d. "
+    			"The length of class count array must be "
+    			"equal to the total number classes + 1",
+    			array_length
+    		);
+    }
+
+    count_array[class] += count;
+
+    //if (rebuild_array)
+    //{
+        /* construct a new array to keep the aggr states. */
+        pg_count_array =
+        	construct_array(
+        		(Datum *)count_array,
+                array_length,
+                INT8OID,
+                sizeof(int64),
+                true,
+                'd'
+                );
+    //}
+
+    PG_RETURN_ARRAYTYPE_P(pg_count_array);
+}
+PG_FUNCTION_INFO_V1(dt_acs_count_sfunc);
+
+
 
