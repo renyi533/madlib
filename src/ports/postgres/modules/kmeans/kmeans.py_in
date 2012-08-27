@@ -54,11 +54,16 @@ def __run_quietly(sql):
     # Remember current message level and set it to ERROR
     prev_msg_level = plpy.execute("SELECT setting FROM pg_settings " \
         + " WHERE name='client_min_messages'")[0]['setting']
-    plpy.execute("SET client_min_messages = error;")
-
+    plpy.execute("SET client_min_messages = INFO;")
+    
     # Run...
     try:
+        start = time.time()
+        info(sql)
         rv = plpy.execute(sql)
+        time_sec = round( time.time() - start, 3)
+        info('consumed time (%s sec)' \
+                % (str(time_sec)));
         # Restore previous message level
         plpy.execute("SET client_min_messages = %s;" % prev_msg_level)
     except:
@@ -796,10 +801,10 @@ def kmeans( madlib_schema
         WHERE abs( 
                   coalesce(''' + madlib_schema + '''.svec_elsum(coords), 'Infinity'::FLOAT8)
                  ) < 'Infinity'::FLOAT8''';
-    plpy.execute( sql);        
+    __run_quietly( sql);        
     # Find the number of points after cleanup
     sql = 'SELECT count(*) as cnt FROM TempPoints0';
-    rv = plpy.execute( sql);    
+    rv = __run_quietly( sql);    
     orig_point_count = point_count;      
     point_count = rv[0]['cnt'];  
     # Find the number of dimensions
@@ -808,7 +813,7 @@ def kmeans( madlib_schema
             min(''' + madlib_schema + '''.svec_dimension(coords)) as min_dim 
             , max(''' + madlib_schema + '''.svec_dimension(coords)) as max_dim 
         FROM TempPoints0''';
-    rv = plpy.execute( sql);   
+    rv = __run_quietly( sql);   
     if rv[0]['min_dim'] != rv[0]['max_dim']:
         plpy.error( "input points must have the same dimensions\n")            
     info( ' * points: ' + str(orig_point_count) + ' (' \
@@ -831,7 +836,7 @@ def kmeans( madlib_schema
                 , madlib_schema = madlib_schema
                 , init_cset_rel = init_cset_rel
             );
-        plpy.execute( sql); 
+        __run_quietly( sql); 
         centr_count = cset_count;
         
     elif k > 0 and init_method == 'kmeans++':        
@@ -924,7 +929,7 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
             , metric = __metric_id(dist_metric)
             , previous_i = str(i-1)
         );
-        plpy.execute( sql);        
+        __run_quietly( sql);        
         time_sec = round( time.time() - start, 3)
         info( '... Iteration %s: temp points generated (%s sec)' \
                 % (str(i),  str(time_sec)));
@@ -945,10 +950,10 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
             ) AS t ON c.cid = t.cid''';
         __run_quietly( sql);        
         
-        plpy.execute( 'TRUNCATE TABLE ' + output_centroids );
-        plpy.execute( 'INSERT INTO ' + output_centroids + ' SELECT * FROM ' \
+        __run_quietly( 'TRUNCATE TABLE ' + output_centroids );
+        __run_quietly( 'INSERT INTO ' + output_centroids + ' SELECT * FROM ' \
                         + output_centroids + '_tmp');
-        plpy.execute( 'DROP TABLE ' + output_centroids + '_tmp');
+        __run_quietly( 'DROP TABLE ' + output_centroids + '_tmp');
                         
         # Calculate the number of points that changed the assignment
         sql = '''
@@ -960,7 +965,7 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
             WHERE
                 t2.pid IS NULL
         ''';
-        rv = plpy.execute( sql);
+        rv = __run_quietly( sql);
         time_sec = round( time.time() - start, 3)
         info( '... Iteration %s: updated %s points (%s sec)' \
                 % (str(i), str(rv[0]['sum']), str(time_sec)));
