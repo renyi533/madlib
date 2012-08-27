@@ -10,8 +10,6 @@ modules:
       depends: ['utilities']
     - name: conjugate_gradient
       depends: ['array_ops']
-    - name: convex
-      depends: ['utilities']
     - name: data_profile
       depends: ['sketch']
     - name: cart

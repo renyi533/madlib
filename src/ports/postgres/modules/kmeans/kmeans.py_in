@@ -925,7 +925,9 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
             , previous_i = str(i-1)
         );
         plpy.execute( sql);        
-
+        time_sec = round( time.time() - start, 3)
+        info( '... Iteration %s: temp points generated (%s sec)' \
+                % (str(i),  str(time_sec)));
         # Refresh the Centroids table based on current assignments
         # Note the coalesce: If there is a centroid which is currently not
         # the closest centroid to any point, just keep its old position
