@@ -69,7 +69,7 @@ compute_metric(PGFunction inMetricFn, MemoryContext inMemContext, Datum inVec1,
     float8          distance;
     MemoryContext   oldContext;
     
-    oldContext = MemoryContextSwitchTo(inMemContext);
+    //oldContext = MemoryContextSwitchTo(inMemContext);
     
     distance = DatumGetFloat8(DirectFunctionCall2(inMetricFn, inVec1, inVec2));
     
@@ -80,14 +80,14 @@ compute_metric(PGFunction inMetricFn, MemoryContext inMemContext, Datum inVec1,
      * The 50k bound here is arbitrary, and motivated by ResetExprContext()
      * in execUtils.c
      */
-    if(inMemContext->allBytesAlloc - inMemContext->allBytesFreed > 50000)
-        MemoryContextReset(inMemContext);
+/*    if(inMemContext->allBytesAlloc - inMemContext->allBytesFreed > 50000)
+        MemoryContextReset(inMemContext);*/
 #else
     /* PostgreSQL does not have the allBytesAlloc and allBytesFreed fields */
-    MemoryContextReset(inMemContext);
+    //MemoryContextReset(inMemContext);
 #endif
     
-    MemoryContextSwitchTo(oldContext);    
+    //MemoryContextSwitchTo(oldContext);    
     return distance;
 }
 
@@ -190,7 +190,7 @@ internal_kmeans_closest_centroid(PG_FUNCTION_ARGS) {
         num_centroids = ARR_DIMS(canopy_ids_arr)[0];
     metric_fn = get_metric_fn(PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 3)));
 
-    mem_context_for_function_calls = setup_mem_context_for_functional_calls();
+    //mem_context_for_function_calls = setup_mem_context_for_functional_calls();
     for (int i = 0; i < num_centroids; i++) {
         cid = indirect ? canopy_ids[i] - ARR_LBOUND(canopy_ids_arr)[0] : i;
         distance = compute_metric(metric_fn, mem_context_for_function_calls,
@@ -200,7 +200,7 @@ internal_kmeans_closest_centroid(PG_FUNCTION_ARGS) {
             min_distance = distance;
         }
     }
-    MemoryContextDelete(mem_context_for_function_calls);
+    //MemoryContextDelete(mem_context_for_function_calls);
     
     PG_RETURN_INT32(closest_centroid + ARR_LBOUND(centroids_arr)[0]);
 }
