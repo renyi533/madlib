@@ -205,6 +205,51 @@ internal_kmeans_closest_centroid(PG_FUNCTION_ARGS) {
     PG_RETURN_INT32(closest_centroid + ARR_LBOUND(centroids_arr)[0]);
 }
 
+
+PG_FUNCTION_INFO_V1(internal_kmeans_closest_centroid2);
+Datum
+internal_kmeans_closest_centroid2(PG_FUNCTION_ARGS) {
+    ArrayType      *array;
+    ArrayType      *centroids_arr;
+    Datum          *centroids;
+    int             num_centroids;
+    PGFunction      metric_fn;
+
+    float8          distance, min_distance = INFINITY;
+    int             closest_centroid = 0;
+    int             cid;
+
+    array = PG_GETARG_ARRAYTYPE_P(verify_arg_nonnull(fcinfo, 0));
+    float8* c_array = (float8 *)ARR_DATA_PTR(array);
+    centroids_arr = PG_GETARG_ARRAYTYPE_P(verify_arg_nonnull(fcinfo, 1));
+    
+    get_svec_array_elms(centroids_arr, &centroids, &num_centroids);
+
+    for (int i = 0; i < num_centroids; i++) {
+        cid =  i;
+        SvecType *svec=(SvecType*) DatumGetPointer(centroids[cid]);
+	    SparseData sdata = sdata_from_svec(svec);
+	    double * float_array = sdata_to_float8arr(sdata);
+        
+        int dimension = svec->dimension;
+        distance =0;
+
+        for( int index=0; index<dimension; index++)
+        {
+            double temp_val = float_array[index]-c_array[index];
+            distance += temp_val*temp_val;
+        }
+        distance = sqrt(distance);
+
+        if (distance < min_distance) {
+            closest_centroid = cid;
+            min_distance = distance;
+        }
+    }
+    
+    PG_RETURN_INT32(closest_centroid + ARR_LBOUND(centroids_arr)[0]);
+}
+
 PG_FUNCTION_INFO_V1(internal_kmeans_canopy_transition);
 Datum
 internal_kmeans_canopy_transition(PG_FUNCTION_ARGS) {
