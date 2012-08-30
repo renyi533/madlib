@@ -802,9 +802,9 @@ def kmeans( madlib_schema
     # Prepare the data set (skip all data points with any NULL values)
     info( 'Input:');
     info( '... analyzing data points')
-    __run_quietly( 'DROP TABLE IF EXISTS TempPoints0');        
+    __run_quietly( 'DROP TABLE IF EXISTS TempPoints0_svec');        
     sql = '''
-        CREATE TEMP TABLE TempPoints0(
+        CREATE TEMP TABLE TempPoints0_svec(
             pid BIGINT, 
             coords ''' + madlib_schema + '''.SVEC, 
             cid INTEGER,
@@ -815,7 +815,7 @@ def kmeans( madlib_schema
     # Create the Temporary Point table
     # Remove any NULL, NaN, and any non-finite values
     sql = '''
-        INSERT INTO TempPoints0 
+        INSERT INTO TempPoints0_svec 
         SELECT pid, coords, 0, null
         FROM ''' + src_view + '''
         WHERE abs( 
@@ -823,7 +823,7 @@ def kmeans( madlib_schema
                  ) < 'Infinity'::FLOAT8''';
     __run_quietly( sql);        
     # Find the number of points after cleanup
-    sql = 'SELECT count(*) as cnt FROM TempPoints0';
+    sql = 'SELECT count(*) as cnt FROM TempPoints0_svec';
     rv = __run_quietly( sql);    
     orig_point_count = point_count;      
     point_count = rv[0]['cnt'];  
@@ -832,13 +832,30 @@ def kmeans( madlib_schema
         SELECT 
             min(''' + madlib_schema + '''.svec_dimension(coords)) as min_dim 
             , max(''' + madlib_schema + '''.svec_dimension(coords)) as max_dim 
-        FROM TempPoints0''';
+        FROM TempPoints0_svec''';
     rv = __run_quietly( sql);   
     if rv[0]['min_dim'] != rv[0]['max_dim']:
         plpy.error( "input points must have the same dimensions\n")            
     info( ' * points: ' + str(orig_point_count) + ' (' \
             + str(rv[0]['min_dim']) + ' dimensions), kept ' + str(point_count) + \
             ' after removing non-finite values');     
+
+    __run_quietly( 'DROP TABLE IF EXISTS TempPoints0');        
+    sql = '''
+        CREATE TEMP TABLE TempPoints0(
+            pid BIGINT, 
+            coords FLOAT8[], 
+            cid INTEGER,
+            canopies INTEGER[]
+        )
+    ''';
+    __run_quietly( sql);
+    sql = '''
+        INSERT INTO TempPoints0
+        SELECT pid, coords::FLOAT8[], 0, null
+        FROM TempPoints0_svec
+        ''';
+    __run_quietly( sql);  
 
     # Initialize centroids
     info( '... generating initial centroids')
@@ -861,7 +878,7 @@ def kmeans( madlib_schema
         
     elif k > 0 and init_method == 'kmeans++':        
         start = time.time()
-        centr_count = __init_plusplus( madlib_schema, 'TempPoints0', k, 
+        centr_count = __init_plusplus( madlib_schema, 'TempPoints0_svec', k, 
                                        point_count, dist_func, 
                                        sample_frac);
         time_sec = round( time.time() - start, 3)
@@ -870,7 +887,7 @@ def kmeans( madlib_schema
         
     elif k > 0 and init_method == 'random':
         start = time.time();
-        centr_count = __init_random( madlib_schema, 'TempPoints0', k, 
+        centr_count = __init_random( madlib_schema, 'TempPoints0_svec', k, 
                                      point_count);
         time_sec = round( time.time() - start, 3)
         info( ' * centroids: %s seeded using random selection (%s sec)' 
@@ -879,7 +896,7 @@ def kmeans( madlib_schema
     # decide whether to disregard k or not when Canopy is chosen
     elif init_method == 'canopy':
         start = time.time();
-        centr_count, t1, t2 = __init_canopy( madlib_schema, 'TempPoints0', 
+        centr_count, t1, t2 = __init_canopy( madlib_schema, 'TempPoints0_svec', 
                                              point_count, dist_metric, 
                                              dist_func, t1, t2)
         time_sec = round( time.time() - start, 3)
@@ -933,12 +950,13 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
             # Compare with all centroids
             canopies = 'NULL';
         
+                #, {madlib_schema}.internal_kmeans_closest_centroid( p.coords, {canopies}, arr.ccoords, {metric})
         sql = '''
             INSERT INTO TempPoints{i}    
             SELECT
                 p.pid 
                 , p.coords
-                , {madlib_schema}.internal_kmeans_closest_centroid( p.coords, {canopies}, arr.ccoords, {metric})
+                , {madlib_schema}.internal_kmeans_closest_centroid2( p.coords,  arr.ccoords)
                 , p.canopies
             FROM 
                 TempPoints{previous_i} p CROSS JOIN TempArrayOfCentroids arr
@@ -957,13 +975,14 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
         # Note the coalesce: If there is a centroid which is currently not
         # the closest centroid to any point, just keep its old position
         __run_quietly( 'DROP TABLE IF EXISTS ' + output_centroids + '_tmp');
+        
         sql = '''
             CREATE TABLE ''' + output_centroids + '''_tmp AS
             SELECT c.cid AS cid, coalesce(t.coords, c.coords) AS coords
             FROM ''' + output_centroids + ''' c LEFT OUTER JOIN
             (
                 SELECT 
-                    ''' + dist_aggr.replace( '&&&', 'coords') + ''' AS coords
+                    ''' + dist_aggr.replace( '&&&', 'madlib.svec_cast_float8arr(coords)') + ''' AS coords
                     , cid AS cid 
                 FROM TempPoints''' + str(i) + ''' 
                 GROUP BY cid
@@ -1009,7 +1028,7 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
     info( 'Writing final output table: ' + output_points + '...');
     sql = '''
         INSERT INTO ''' + output_points + '''    
-        SELECT pid, coords, cid 
+        SELECT pid, madlib.svec_cast_float8arr(coords), cid 
         FROM TempPoints''' + str(i);
     rv, time_sec = __timed_execute( sql);      
     info( '... %s sec' % time_sec);

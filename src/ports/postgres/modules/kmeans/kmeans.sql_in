@@ -304,6 +304,17 @@ RETURNS INTEGER AS
 LANGUAGE c
 IMMUTABLE; /* This function must *not* be declared STRICT! */
 
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.internal_kmeans_closest_centroid2( 
+    "point"               FLOAT8[],
+    "centroidCoordinates" MADLIB_SCHEMA.SVEC[]
+)
+RETURNS INTEGER AS
+'MODULE_PATHNAME'
+LANGUAGE c
+IMMUTABLE; /* This function must *not* be declared STRICT! */
+
+
 /**
  * @internal
  * @brief Transition function for UDA:kmeans_canopy() 
