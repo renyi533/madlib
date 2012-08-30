@@ -840,11 +840,26 @@ def kmeans( madlib_schema
             + str(rv[0]['min_dim']) + ' dimensions), kept ' + str(point_count) + \
             ' after removing non-finite values');     
 
+
+    __run_quietly( 'DROP TABLE IF EXISTS DataPointsArray');        
+    sql = '''
+        CREATE TEMP TABLE DataPointsArray(
+            pid BIGINT, 
+            coords FLOAT8[]
+        )
+    ''';
+    __run_quietly( sql);
+    sql = '''
+        INSERT INTO DataPointsArray
+        SELECT pid, coords::FLOAT8[]
+        FROM TempPoints0_svec
+        ''';
+    __run_quietly( sql);  
+
     __run_quietly( 'DROP TABLE IF EXISTS TempPoints0');        
     sql = '''
         CREATE TEMP TABLE TempPoints0(
             pid BIGINT, 
-            coords FLOAT8[], 
             cid INTEGER,
             canopies INTEGER[]
         )
@@ -852,7 +867,7 @@ def kmeans( madlib_schema
     __run_quietly( sql);
     sql = '''
         INSERT INTO TempPoints0
-        SELECT pid, coords::FLOAT8[], 0, null
+        SELECT pid, 0, null
         FROM TempPoints0_svec
         ''';
     __run_quietly( sql);  
@@ -955,11 +970,15 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
             INSERT INTO TempPoints{i}    
             SELECT
                 p.pid 
-                , p.coords
                 , {madlib_schema}.internal_kmeans_closest_centroid2( p.coords,  arr.ccoords)
                 , p.canopies
             FROM 
-                TempPoints{previous_i} p CROSS JOIN TempArrayOfCentroids arr
+                (
+                SELECT d.pid, d.coords, t.canopies
+                FROM DataPointsArray d, TempPoints{previous_i} t
+                WHERE d.pid = t.pid
+                ) p
+                CROSS JOIN TempArrayOfCentroids arr
         '''.format(
             i = str(i)
             , madlib_schema = madlib_schema
@@ -984,7 +1003,12 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
                 SELECT 
                     ''' + dist_aggr.replace( '&&&', 'madlib.svec_cast_float8arr(coords)') + ''' AS coords
                     , cid AS cid 
-                FROM TempPoints''' + str(i) + ''' 
+                FROM 
+                (
+                SELECT d.pid, d.coords, t.cid
+                FROM DataPointsArray d, TempPoints''' + str(i) + ''' t
+                WHERE d.pid = t.pid
+                ) p
                 GROUP BY cid
             ) AS t ON c.cid = t.cid''';
         __run_quietly( sql);        
@@ -1029,7 +1053,13 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `
     sql = '''
         INSERT INTO ''' + output_points + '''    
         SELECT pid, madlib.svec_cast_float8arr(coords), cid 
-        FROM TempPoints''' + str(i);
+        FROM
+                (
+                SELECT d.pid, d.coords, t.cid
+                FROM DataPointsArray d, TempPoints''' + str(i) + ''' t
+                WHERE d.pid = t.pid
+                ) p        
+        ''';
     rv, time_sec = __timed_execute( sql);      
     info( '... %s sec' % time_sec);
 
