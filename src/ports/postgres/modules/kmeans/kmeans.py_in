@@ -941,7 +941,7 @@ def kmeans( madlib_schema
         sql = '''
             CREATE TEMP TABLE TempArrayOfCentroids AS
             SELECT
-                {madlib_schema}.internal_kmeans_agg_centroid(coords, {dimension}, {num_of_centroids}, cid) as ccoords
+                {madlib_schema}.internal_kmeans_agg_centroid(coords::FLOAT8[], {dimension}, {num_of_centroids}, cid) as ccoords
             FROM {output_centroids}
             '''.format(
                 output_centroids = output_centroids
