@@ -209,34 +209,93 @@ internal_kmeans_closest_centroid(PG_FUNCTION_ARGS) {
 PG_FUNCTION_INFO_V1(internal_kmeans_closest_centroid2);
 Datum
 internal_kmeans_closest_centroid2(PG_FUNCTION_ARGS) {
-    ArrayType      *array;
-    ArrayType      *centroids_arr;
-    Datum          *centroids;
-    int             num_centroids;
-    PGFunction      metric_fn;
+    ArrayType      *point_array;
+    ArrayType      *centroids_array;
 
     float8          distance, min_distance = INFINITY;
     int             closest_centroid = 0;
     int             cid;
 
-    array = PG_GETARG_ARRAYTYPE_P(verify_arg_nonnull(fcinfo, 0));
-    float8* c_array = (float8 *)ARR_DATA_PTR(array);
-    centroids_arr = PG_GETARG_ARRAYTYPE_P(verify_arg_nonnull(fcinfo, 1));
-    
-    get_svec_array_elms(centroids_arr, &centroids, &num_centroids);
+    point_array = PG_GETARG_ARRAYTYPE_P(verify_arg_nonnull(fcinfo, 0));
+    float8* c_point_array = (float8 *)ARR_DATA_PTR(point_array);
+    centroids_array = PG_GETARG_ARRAYTYPE_P(verify_arg_nonnull(fcinfo, 1));
+    float8* c_centroids_array = (float8 *)ARR_DATA_PTR(centroids_array);
 
-    for (int i = 0; i < num_centroids; i++) {
-        cid =  i;
-        SvecType *svec=(SvecType*) DatumGetPointer(centroids[cid]);
-	    SparseData sdata = sdata_from_svec(svec);
-	    double * float_array = sdata_to_float8arr(sdata);
-        
-        int dimension = svec->dimension;
+    int dimension = PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 2));
+    int num_of_centroids = PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 3)); 
+    int centroids_array_len = num_of_centroids*dimension;
+    int dist_metric = PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 4)); 
+
+    ArrayType      *canopy_ids_arr = NULL;
+    int4           *canopy_ids = NULL;
+    bool            indirect;
+    if (PG_ARGISNULL(5)) {
+        indirect = false;
+    } else {
+        indirect = true;
+        canopy_ids_arr = PG_GETARG_ARRAYTYPE_P(5);
+        /* There should always be a close canopy, but let's be on the safe side. */
+        if (ARR_NDIM(canopy_ids_arr) == 0)
+            ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("internal error: array of close canopies cannot be empty")));
+        canopy_ids = (int4*) ARR_DATA_PTR(canopy_ids_arr);
+        num_of_centroids = ARR_DIMS(canopy_ids_arr)[0];
+    }
+
+    if (dimension < 1)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("function \"%s\", Invalid dimension:%d",
+                    format_procedure(fcinfo->flinfo->fn_oid), 
+                    dimension)));
+    }
+
+    if (num_of_centroids < 1)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("function \"%s\", Invalid num_of_centroids:%d",
+                    format_procedure(fcinfo->flinfo->fn_oid), 
+                    num_of_centroids)));
+    }
+
+    int array_dim = ARR_NDIM(point_array);
+    int *p_array_dim = ARR_DIMS(point_array);
+    int array_length = ArrayGetNItems(array_dim, p_array_dim);
+
+    if (array_length != dimension)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("function \"%s\", Invalid point array length. "
+                    "Expected: %d, Actual:%d",
+                    format_procedure(fcinfo->flinfo->fn_oid), 
+                    dimension, array_length)));
+    }
+
+    array_dim = ARR_NDIM(centroids_array);
+    p_array_dim = ARR_DIMS(centroids_array);
+    array_length = ArrayGetNItems(array_dim, p_array_dim);
+
+    if (array_length != centroids_array_len)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("function \"%s\", Invalid centroids array length. "
+                    "Expected: %d, Actual:%d",
+                    format_procedure(fcinfo->flinfo->fn_oid), 
+                    centroids_array_len, array_length)));
+    }
+
+    for (int i = 0; i< num_of_centroids; i++) {
+        cid = indirect ? canopy_ids[i] - ARR_LBOUND(canopy_ids_arr)[0] : i;
+	    double * centroid = c_centroids_array+cid*dimension;
         distance =0;
-
-        for( int index=0; index<dimension; index++)
+        for(int index=0; index<dimension; index++)
         {
-            double temp_val = float_array[index]-c_array[index];
+            double temp_val = centroid[index]-c_point_array[index];
             distance += temp_val*temp_val;
         }
         distance = sqrt(distance);
@@ -247,8 +306,161 @@ internal_kmeans_closest_centroid2(PG_FUNCTION_ARGS) {
         }
     }
     
-    PG_RETURN_INT32(closest_centroid + ARR_LBOUND(centroids_arr)[0]);
+    PG_RETURN_INT32(closest_centroid+ARR_LBOUND(centroids_array)[0]);
 }
+
+
+PG_FUNCTION_INFO_V1(internal_kmeans_agg_centroid_trans);
+Datum
+internal_kmeans_agg_centroid_trans(PG_FUNCTION_ARGS) {
+    ArrayType       *array = NULL;
+    SvecType        *svec = NULL;
+    int32           dimension;
+    int32           num_of_centroids;
+    int32           centroid_index;
+    bool            rebuild_array = false;
+    int32           expected_array_len;
+
+    float8          *c_array = NULL;
+    svec = PG_GETARG_SVECTYPE_P(verify_arg_nonnull(fcinfo, 1));
+    dimension = PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 2));
+    num_of_centroids = PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 3));
+    centroid_index = PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 4));
+    
+    expected_array_len = num_of_centroids*dimension;
+    if (dimension < 1)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("function \"%s\", Invalid dimension:%d",
+                    format_procedure(fcinfo->flinfo->fn_oid), 
+                    dimension)));
+    }
+
+    if (svec->dimension != dimension)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("function \"%s\", Inconsistent Dimension. "
+                     "Expected:%d, Actual:%d",
+                    format_procedure(fcinfo->flinfo->fn_oid), 
+                    dimension, svec->dimension)));
+
+    }
+
+    if (num_of_centroids < 1)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("function \"%s\", Invalid num_of_centroids:%d",
+                    format_procedure(fcinfo->flinfo->fn_oid), 
+                    num_of_centroids)));
+    }
+
+    if (centroid_index < 1 || centroid_index>num_of_centroids)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("function \"%s\", Invalid centroid_index:%d",
+                    format_procedure(fcinfo->flinfo->fn_oid), 
+                    centroid_index)));
+    }
+
+    if (PG_ARGISNULL(0))
+    {
+        c_array = palloc0(expected_array_len*sizeof(float8));
+        rebuild_array = true;
+    }
+    else
+    {
+        if (fcinfo->context && IsA(fcinfo->context, AggState))
+            array = PG_GETARG_ARRAYTYPE_P(0);
+        else
+            array = PG_GETARG_ARRAYTYPE_P_COPY(0);        
+        
+        int array_dim = ARR_NDIM(array);
+        int *p_array_dim = ARR_DIMS(array);
+        int array_length = ArrayGetNItems(array_dim, p_array_dim);
+
+        if (array_length != expected_array_len)
+        {
+            ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("function \"%s\", Invalid array length. "
+                        "Expected: %d, Actual:%d",
+                        format_procedure(fcinfo->flinfo->fn_oid), 
+                        expected_array_len, array_length)));
+        }
+        c_array = (float8 *)ARR_DATA_PTR(array);
+    }
+    
+    SparseData sdata = sdata_from_svec(svec);
+    float8 * float_array = sdata_to_float8arr(sdata);
+    
+    float8 * data_ptr = c_array+(centroid_index-1)*dimension;
+    for(int index=0; index<dimension; index++)
+    {
+        data_ptr[index] = float_array[index];
+    }
+
+    if (rebuild_array)
+    {
+        /* construct a new array to keep the aggr states. */
+        array =
+        	construct_array(
+        		(Datum *)c_array,
+                expected_array_len,
+                FLOAT8OID,
+                sizeof(float8),
+                true,
+                'd'
+                );
+    }
+    elog(NOTICE, "return from internal_kmeans_agg_centroid_trans");
+    PG_RETURN_ARRAYTYPE_P(array);
+}
+
+
+PG_FUNCTION_INFO_V1(internal_kmeans_agg_centroid_merge);
+Datum
+internal_kmeans_agg_centroid_merge(PG_FUNCTION_ARGS) {
+    /* This function is declared as strict. No checking null here. */
+    ArrayType       *array = NULL;
+    ArrayType       *array2 = NULL;    
+    if (fcinfo->context && IsA(fcinfo->context, AggState))
+        array = PG_GETARG_ARRAYTYPE_P(0);
+    else
+        array = PG_GETARG_ARRAYTYPE_P_COPY(0);        
+    
+    int array_dim = ARR_NDIM(array);
+    int *p_array_dim = ARR_DIMS(array);
+    int array_length = ArrayGetNItems(array_dim, p_array_dim);
+
+    array2 = PG_GETARG_ARRAYTYPE_P(1);
+    array_dim = ARR_NDIM(array2);
+    p_array_dim = ARR_DIMS(array2);
+    int array2_length = ArrayGetNItems(array_dim, p_array_dim);
+
+    if (array_length != array2_length)
+    {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("function \"%s\", Inconsistent array length. "
+                    "first: %d, second:%d",
+                    format_procedure(fcinfo->flinfo->fn_oid), 
+                    array_length, array2_length)));
+    }
+
+    float8* c_array = (float8 *)ARR_DATA_PTR(array);
+    float8* c_array2 = (float8 *)ARR_DATA_PTR(array);
+
+    for(int i=0; i<array_length; i++)
+    {
+        c_array[i]+= c_array2[i];
+    }
+    PG_RETURN_ARRAYTYPE_P(array);
+}
+
 
 PG_FUNCTION_INFO_V1(internal_kmeans_canopy_transition);
 Datum
