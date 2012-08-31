@@ -968,7 +968,7 @@ def kmeans( madlib_schema
             INSERT INTO TempPoints{i}    
             SELECT
                 p.pid 
-                , {madlib_schema}.internal_kmeans_closest_centroid2(p.coords,  
+                , {madlib_schema}.internal_kmeans_closest_centroid(p.coords,  
                         arr.ccoords, {dimension}, {num_of_centroids}, {metric},
                         {canopies})
                 , p.canopies

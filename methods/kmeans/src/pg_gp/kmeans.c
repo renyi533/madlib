@@ -2,6 +2,7 @@
 #include <nodes/memnodes.h>
 #include <utils/builtins.h>
 #include <utils/memutils.h>
+#include <math.h>
 #include "../../../svec/src/pg_gp/sparse_vector.h"
 #include "../../../svec/src/pg_gp/operators.h"
 
@@ -41,6 +42,7 @@ get_svec_array_elms(ArrayType *inArrayType, Datum **outSvecArr, int *outLen)
                   outLen);                   /* nelemsp */
 }
 
+
 static
 inline
 PGFunction
@@ -69,7 +71,7 @@ compute_metric(PGFunction inMetricFn, MemoryContext inMemContext, Datum inVec1,
     float8          distance;
     MemoryContext   oldContext;
     
-    //oldContext = MemoryContextSwitchTo(inMemContext);
+    oldContext = MemoryContextSwitchTo(inMemContext);
     
     distance = DatumGetFloat8(DirectFunctionCall2(inMetricFn, inVec1, inVec2));
     
@@ -80,14 +82,14 @@ compute_metric(PGFunction inMetricFn, MemoryContext inMemContext, Datum inVec1,
      * The 50k bound here is arbitrary, and motivated by ResetExprContext()
      * in execUtils.c
      */
-/*    if(inMemContext->allBytesAlloc - inMemContext->allBytesFreed > 50000)
-        MemoryContextReset(inMemContext);*/
+    if(inMemContext->allBytesAlloc - inMemContext->allBytesFreed > 50000)
+        MemoryContextReset(inMemContext);
 #else
     /* PostgreSQL does not have the allBytesAlloc and allBytesFreed fields */
-    //MemoryContextReset(inMemContext);
+    MemoryContextReset(inMemContext);
 #endif
     
-    //MemoryContextSwitchTo(oldContext);    
+    MemoryContextSwitchTo(oldContext);    
     return distance;
 }
 
@@ -154,61 +156,134 @@ internal_get_array_of_close_canopies(PG_FUNCTION_ARGS)
     PG_RETURN_ARRAYTYPE_P(close_canopies_arr);
 }
 
-PG_FUNCTION_INFO_V1(internal_kmeans_closest_centroid);
-Datum
-internal_kmeans_closest_centroid(PG_FUNCTION_ARGS) {
-    SvecType       *svec;
-    ArrayType      *canopy_ids_arr = NULL;
-    int4           *canopy_ids = NULL;
-    ArrayType      *centroids_arr;
-    Datum          *centroids;
-    int             num_centroids;
-    PGFunction      metric_fn;
-
-    bool            indirect;
-    float8          distance, min_distance = INFINITY;
-    int             closest_centroid = 0;
-    int             cid;
-    MemoryContext   mem_context_for_function_calls;
-
-    svec = PG_GETARG_SVECTYPE_P(verify_arg_nonnull(fcinfo, 0));
-    if (PG_ARGISNULL(1)) {
-        indirect = false;
-    } else {
-        indirect = true;
-        canopy_ids_arr = PG_GETARG_ARRAYTYPE_P(1);
-        /* There should always be a close canopy, but let's be on the safe side. */
-        if (ARR_NDIM(canopy_ids_arr) == 0)
-            ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("internal error: array of close canopies cannot be empty")));
-        canopy_ids = (int4*) ARR_DATA_PTR(canopy_ids_arr);
+static float8 calc_l2norm_distance(float8* array1, float8* array2, int32 dimension)
+{
+    if( array1 == NULL || array2 == NULL )
+    {
+        elog(ERROR, "In %s, arrays should not be NULL", __FUNCTION__);
     }
-    centroids_arr = PG_GETARG_ARRAYTYPE_P(verify_arg_nonnull(fcinfo, 2));
-    get_svec_array_elms(centroids_arr, &centroids, &num_centroids);
-    if (!PG_ARGISNULL(1))
-        num_centroids = ARR_DIMS(canopy_ids_arr)[0];
-    metric_fn = get_metric_fn(PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 3)));
-
-    //mem_context_for_function_calls = setup_mem_context_for_functional_calls();
-    for (int i = 0; i < num_centroids; i++) {
-        cid = indirect ? canopy_ids[i] - ARR_LBOUND(canopy_ids_arr)[0] : i;
-        distance = compute_metric(metric_fn, mem_context_for_function_calls,
-            PointerGetDatum(svec), centroids[cid]);
-        if (distance < min_distance) {
-            closest_centroid = cid;
-            min_distance = distance;
-        }
-    }
-    //MemoryContextDelete(mem_context_for_function_calls);
     
-    PG_RETURN_INT32(closest_centroid + ARR_LBOUND(centroids_arr)[0]);
+    float8 distance =0;
+    for(int index=0; index<dimension; index++)
+    {
+        float8 temp_val = array1[index]-array2[index];
+        distance += temp_val*temp_val;
+    }
+    distance = sqrt(distance);
+    return distance;
 }
 
 
-PG_FUNCTION_INFO_V1(internal_kmeans_closest_centroid2);
+static float8 calc_l1norm_distance(float8* array1, float8* array2, int32 dimension)
+{
+    if( array1 == NULL || array2 == NULL )
+    {
+        elog(ERROR, "In %s, arrays should not be NULL", __FUNCTION__);
+    }
+    
+    float8 distance =0;
+    for(int index=0; index<dimension; index++)
+    {
+        float8 temp_val = array1[index]-array2[index];
+        distance += fabs(temp_val);
+    }
+    distance = sqrt(distance);
+    return distance;
+}
+
+
+static float8 calc_dot_product(float8* array1, float8* array2, int32 dimension)
+{
+    float8 val =0;
+    for(int index=0; index<dimension; index++)
+    {
+        val += array1[index]*array2[index];
+    }
+    return val;
+}
+
+static float8 calc_l2norm_val(float8* array, int32 dimension)
+{
+    float8 val =0;
+    for(int index=0; index<dimension; index++)
+    {
+        val += array[index]*array[index];
+    }
+    return sqrt(val);
+}
+
+static float8 calc_cosine_distance(float8* array1, float8* array2, int32 dimension)
+{
+    if( array1 == NULL || array2 == NULL )
+    {
+        elog(ERROR, "In %s, arrays should not be NULL", __FUNCTION__);
+    }
+    
+    float8 dot_product = calc_dot_product(array1, array2, dimension);
+    float8 array1_l2norm = calc_l2norm_val(array1, dimension);
+    float8 array2_l2norm = calc_l2norm_val(array2, dimension);
+
+    float8 distance = dot_product/(array1_l2norm*array2_l2norm);
+
+	if (distance > 1.0) {
+		distance = 1.0;
+	}
+	else if (distance < -1.0) {
+		distance = -1.0;
+	}
+
+    return distance;
+}
+
+
+static float8 calc_tanimoto_distance(float8* array1, float8* array2, int32 dimension)
+{
+    if( array1 == NULL || array2 == NULL )
+    {
+        elog(ERROR, "In %s, arrays should not be NULL", __FUNCTION__);
+    }
+    
+    float8 dot_product = calc_dot_product(array1, array2, dimension);
+    float8 array1_l2norm = calc_l2norm_val(array1, dimension);
+    float8 array2_l2norm = calc_l2norm_val(array2, dimension);
+    
+    float8 denominator = array1_l2norm*array1_l2norm+
+        array2_l2norm*array2_l2norm-dot_product;
+    float8 distance = dot_product/denominator;
+
+	if (distance > 1.0) {
+		distance = 1.0;
+	}
+	else if (distance < 0) {
+		distance = 0;
+	}
+
+    return distance;
+}
+
+typedef float8  (*MetricFunc)(float8*, float8*, int32);
+static
+inline
+MetricFunc
+get_metric_fn_for_array(KMeansMetric inMetric)
+{
+    MetricFunc metrics[] = {
+            calc_l1norm_distance,
+            calc_l2norm_distance,
+            calc_cosine_distance,
+            calc_tanimoto_distance
+        };
+    
+    if (inMetric < 1 || inMetric > sizeof(metrics)/sizeof(PGFunction))
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("invalid metric")));
+    return metrics[inMetric - 1];
+}
+
+PG_FUNCTION_INFO_V1(internal_kmeans_closest_centroid);
 Datum
-internal_kmeans_closest_centroid2(PG_FUNCTION_ARGS) {
+internal_kmeans_closest_centroid(PG_FUNCTION_ARGS) {
     ArrayType      *point_array;
     ArrayType      *centroids_array;
 
@@ -292,13 +367,9 @@ internal_kmeans_closest_centroid2(PG_FUNCTION_ARGS) {
     for (int i = 0; i< num_of_centroids; i++) {
         cid = indirect ? canopy_ids[i] - ARR_LBOUND(canopy_ids_arr)[0] : i;
 	    double * centroid = c_centroids_array+cid*dimension;
-        distance =0;
-        for(int index=0; index<dimension; index++)
-        {
-            double temp_val = centroid[index]-c_point_array[index];
-            distance += temp_val*temp_val;
-        }
-        distance = sqrt(distance);
+        
+        MetricFunc func = get_metric_fn_for_array(dist_metric);
+        distance = (*func)(centroid, c_point_array, dimension);
 
         if (distance < min_distance) {
             closest_centroid = cid;
