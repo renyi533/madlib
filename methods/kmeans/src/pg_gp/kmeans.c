@@ -472,7 +472,8 @@ internal_kmeans_agg_centroid_trans(PG_FUNCTION_ARGS) {
     {
         data_ptr[index] = float_array[index];
     }
-
+    
+    pfree(float_array);
     if (rebuild_array)
     {
         /* construct a new array to keep the aggr states. */
@@ -486,7 +487,6 @@ internal_kmeans_agg_centroid_trans(PG_FUNCTION_ARGS) {
                 'd'
                 );
     }
-    elog(NOTICE, "return from internal_kmeans_agg_centroid_trans");
     PG_RETURN_ARRAYTYPE_P(array);
 }
 
