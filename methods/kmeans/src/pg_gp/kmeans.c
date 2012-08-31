@@ -384,15 +384,21 @@ PG_FUNCTION_INFO_V1(internal_kmeans_agg_centroid_trans);
 Datum
 internal_kmeans_agg_centroid_trans(PG_FUNCTION_ARGS) {
     ArrayType       *array = NULL;
-    SvecType        *svec = NULL;
+    ArrayType       *cent_array = NULL;
     int32           dimension;
     int32           num_of_centroids;
     int32           centroid_index;
     bool            rebuild_array = false;
     int32           expected_array_len;
-
+    
     float8          *c_array = NULL;
-    svec = PG_GETARG_SVECTYPE_P(verify_arg_nonnull(fcinfo, 1));
+    cent_array = PG_GETARG_ARRAYTYPE_P(verify_arg_nonnull(fcinfo, 1));
+
+    int array_dim = ARR_NDIM(cent_array);
+    int *p_array_dim = ARR_DIMS(cent_array);
+    int array_length = ArrayGetNItems(array_dim, p_array_dim);
+    float8* c_cent_array = (float8 *)ARR_DATA_PTR(cent_array);
+
     dimension = PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 2));
     num_of_centroids = PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 3));
     centroid_index = PG_GETARG_INT32(verify_arg_nonnull(fcinfo, 4));
@@ -407,14 +413,14 @@ internal_kmeans_agg_centroid_trans(PG_FUNCTION_ARGS) {
                     dimension)));
     }
 
-    if (svec->dimension != dimension)
+    if (array_length != dimension)
     {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("function \"%s\", Inconsistent Dimension. "
                      "Expected:%d, Actual:%d",
                     format_procedure(fcinfo->flinfo->fn_oid), 
-                    dimension, svec->dimension)));
+                    dimension, array_length)));
 
     }
 
@@ -448,9 +454,9 @@ internal_kmeans_agg_centroid_trans(PG_FUNCTION_ARGS) {
         else
             array = PG_GETARG_ARRAYTYPE_P_COPY(0);        
         
-        int array_dim = ARR_NDIM(array);
-        int *p_array_dim = ARR_DIMS(array);
-        int array_length = ArrayGetNItems(array_dim, p_array_dim);
+        array_dim = ARR_NDIM(array);
+        p_array_dim = ARR_DIMS(array);
+        array_length = ArrayGetNItems(array_dim, p_array_dim);
 
         if (array_length != expected_array_len)
         {
@@ -464,16 +470,13 @@ internal_kmeans_agg_centroid_trans(PG_FUNCTION_ARGS) {
         c_array = (float8 *)ARR_DATA_PTR(array);
     }
     
-    SparseData sdata = sdata_from_svec(svec);
-    float8 * float_array = sdata_to_float8arr(sdata);
     
     float8 * data_ptr = c_array+(centroid_index-1)*dimension;
     for(int index=0; index<dimension; index++)
     {
-        data_ptr[index] = float_array[index];
+        data_ptr[index] = c_cent_array[index];
     }
     
-    pfree(float_array);
     if (rebuild_array)
     {
         /* construct a new array to keep the aggr states. */
@@ -522,7 +525,7 @@ internal_kmeans_agg_centroid_merge(PG_FUNCTION_ARGS) {
     }
 
     float8* c_array = (float8 *)ARR_DATA_PTR(array);
-    float8* c_array2 = (float8 *)ARR_DATA_PTR(array);
+    float8* c_array2 = (float8 *)ARR_DATA_PTR(array2);
 
     for(int i=0; i<array_length; i++)
     {

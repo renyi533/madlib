@@ -314,7 +314,7 @@ IMMUTABLE; /* This function must *not* be declared STRICT! */
  */
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.internal_kmeans_agg_centroid_trans( 
     "centroids_array"               FLOAT8[],
-    "centroidCoordinate"            MADLIB_SCHEMA.SVEC,
+    "centroidCoordinate"            FLOAT8[],
     "dimension"                     INTEGER,
     "numOfCentroids"                INTEGER,
     "centroidIndex"                 INTEGER
@@ -339,7 +339,7 @@ IMMUTABLE STRICT;
 
 
 CREATE AGGREGATE MADLIB_SCHEMA.internal_kmeans_agg_centroid(
-    MADLIB_SCHEMA.SVEC,
+    FLOAT8[],
     INTEGER,
     INTEGER,
     INTEGER
