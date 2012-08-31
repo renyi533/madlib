@@ -307,12 +307,53 @@ IMMUTABLE; /* This function must *not* be declared STRICT! */
 
 CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.internal_kmeans_closest_centroid2( 
     "point"               FLOAT8[],
-    "centroidCoordinates" MADLIB_SCHEMA.SVEC[]
+    "centroidCoordinates" FLOAT8[],
+    "dimension"           INTEGER,
+    "numOfCentroids"      INTEGER,
+    "dist_metric"         INTEGER,
+    "closeCentroids"      INTEGER[]
 )
 RETURNS INTEGER AS
 'MODULE_PATHNAME'
 LANGUAGE c
 IMMUTABLE; /* This function must *not* be declared STRICT! */
+
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.internal_kmeans_agg_centroid_trans( 
+    "centroids_array"               FLOAT8[],
+    "centroidCoordinate"            MADLIB_SCHEMA.SVEC,
+    "dimension"                     INTEGER,
+    "numOfCentroids"                INTEGER,
+    "centroidIndex"                 INTEGER
+)
+RETURNS FLOAT8[] AS
+'MODULE_PATHNAME'
+LANGUAGE c
+IMMUTABLE; /* This function must *not* be declared STRICT! */
+
+
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.internal_kmeans_agg_centroid_merge( 
+    "centroids_array"               FLOAT8[],
+    "centroids_array2"              FLOAT8[]    
+)
+RETURNS FLOAT8[] AS
+'MODULE_PATHNAME'
+LANGUAGE c
+IMMUTABLE STRICT;
+
+
+CREATE AGGREGATE MADLIB_SCHEMA.internal_kmeans_agg_centroid(
+    MADLIB_SCHEMA.SVEC,
+    INTEGER,
+    INTEGER,
+    INTEGER
+) (
+    sfunc = MADLIB_SCHEMA.internal_kmeans_agg_centroid_trans,
+    m4_ifdef(`__GREENPLUM__', `
+        prefunc = MADLIB_SCHEMA.internal_kmeans_agg_centroid_merge,
+    ')
+    stype = FLOAT8[]
+);
 
 
 /**
