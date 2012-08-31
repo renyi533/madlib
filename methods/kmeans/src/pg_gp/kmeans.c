@@ -187,7 +187,6 @@ static float8 calc_l1norm_distance(float8* array1, float8* array2, int32 dimensi
         float8 temp_val = array1[index]-array2[index];
         distance += fabs(temp_val);
     }
-    distance = sqrt(distance);
     return distance;
 }
 
@@ -232,7 +231,7 @@ static float8 calc_cosine_distance(float8* array1, float8* array2, int32 dimensi
 		distance = -1.0;
 	}
 
-    return distance;
+    return acos(distance);
 }
 
 
@@ -258,7 +257,7 @@ static float8 calc_tanimoto_distance(float8* array1, float8* array2, int32 dimen
 		distance = 0;
 	}
 
-    return distance;
+    return 1. - distance;
 }
 
 typedef float8  (*MetricFunc)(float8*, float8*, int32);
