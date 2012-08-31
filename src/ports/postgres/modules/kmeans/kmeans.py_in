@@ -54,16 +54,11 @@ def __run_quietly(sql):
     # Remember current message level and set it to ERROR
     prev_msg_level = plpy.execute("SELECT setting FROM pg_settings " \
         + " WHERE name='client_min_messages'")[0]['setting']
-    plpy.execute("SET client_min_messages = INFO;")
+    plpy.execute("SET client_min_messages = ERROR;")
     
     # Run...
     try:
-        start = time.time()
-        info(sql)
         rv = plpy.execute(sql)
-        time_sec = round( time.time() - start, 3)
-        info('consumed time (%s sec)' \
-                % (str(time_sec)));
         # Restore previous message level
         plpy.execute("SET client_min_messages = %s;" % prev_msg_level)
     except:
