@@ -3071,6 +3071,7 @@ DECLARE
     size_finished           INT;
     time_stamp              TIMESTAMP;
     time_stamp2            TIMESTAMP;
+    time_stamp4            TIMESTAMP;
     time_stamp3            TIMESTAMP;
     metatable_name          TEXT   := '';
     id_col_name             TEXT   := 'id';
@@ -3204,6 +3205,7 @@ BEGIN
     
     time_stamp3 = clock_timestamp();
     FOR curr_level IN 1..max_level LOOP
+        time_stamp2 = clock_timestamp();
         IF (verbosity > 0) THEN  
             RAISE INFO 'new_depth: %', curr_level;
         END IF;
@@ -3228,7 +3230,9 @@ BEGIN
                   
             EXIT;
         END IF;
-        
+        RAISE INFO 'Initial block: %', clock_timestamp()-time_stamp2;
+
+        time_stamp4 = clock_timestamp();
         SELECT MADLIB_SCHEMA.__format(
             'INSERT INTO %
             SELECT pt.tid, pt.id, 
@@ -3271,13 +3275,15 @@ BEGIN
         time_stamp2 = clock_timestamp();
         
         EXECUTE curstmt;
-        RAISE INFO '%, %', curstmt, clock_timestamp()-time_stamp2;
+        RAISE INFO '%, No format:%, with:%', curstmt, clock_timestamp()-time_stamp2, clock_timestamp()-time_stamp4;
         /*
          *  if the node (whose id is "jump") doesn't exist, 
          *  then insert them into result table 
          *  (be classified to max_class of its corrsponding node)
          */
         FOR tree_id IN EXECUTE 'SELECT DISTINCT tid FROM '||tree_table_name LOOP
+        time_stamp4 = clock_timestamp();
+        
             SELECT MADLIB_SCHEMA.__format(
                 'INSERT INTO %(tid,id, jump, class, prob, parent_id, leaf_id) 
                 SELECT tid,id, 0, class, prob, parent_id, leaf_id
@@ -3296,9 +3302,12 @@ BEGIN
         time_stamp2 = clock_timestamp();
         
         EXECUTE curstmt;
-        RAISE INFO '%, %', curstmt, clock_timestamp()-time_stamp2;
+        RAISE INFO '%, No format:%, with:%', curstmt, clock_timestamp()-time_stamp2, clock_timestamp()-time_stamp4;
+
         
             -- delete from the being classified data table
+        time_stamp4 = clock_timestamp();
+        
             SELECT MADLIB_SCHEMA.__format(
                 'DELETE FROM %
                 WHERE jump NOT IN (SELECT id FROM % WHERE tid=%)
@@ -3314,7 +3323,8 @@ BEGIN
         time_stamp2 = clock_timestamp();
         
         EXECUTE curstmt;
-        RAISE INFO '%, %', curstmt, clock_timestamp()-time_stamp2;
+        RAISE INFO '%, No format:%, with:%', curstmt, clock_timestamp()-time_stamp2, clock_timestamp()-time_stamp4;
+
         END LOOP;  
     END LOOP;
     RAISE INFO 'For LOOP time, %', clock_timestamp()-time_stamp3;
