@@ -3071,6 +3071,7 @@ DECLARE
     size_finished           INT;
     time_stamp              TIMESTAMP;
     time_stamp2            TIMESTAMP;
+    time_stamp3            TIMESTAMP;
     metatable_name          TEXT   := '';
     id_col_name             TEXT   := 'id';
     curr_level              INT    := 1;
@@ -3200,7 +3201,8 @@ BEGIN
     IF( max_level is NULL ) THEN
         RAISE EXCEPTION 'tree should not be empty';
     END IF;
-
+    
+    time_stamp3 = clock_timestamp();
     FOR curr_level IN 1..max_level LOOP
         IF (verbosity > 0) THEN  
             RAISE INFO 'new_depth: %', curr_level;
@@ -3315,6 +3317,7 @@ BEGIN
         RAISE INFO '%, %', curstmt, clock_timestamp()-time_stamp2;
         END LOOP;  
     END LOOP;
+    RAISE INFO 'For LOOP time, %', clock_timestamp()-time_stamp3;
 
     EXECUTE 'INSERT INTO '||result_table_name||' SELECT * FROM '|| 
         table_names[table_pick] ||' WHERE jump = 0;';
