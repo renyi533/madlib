@@ -3187,6 +3187,11 @@ BEGIN
         FROM ' || encoded_table_name || ' m CROSS JOIN 
         (SELECT DISTINCT tid,id FROM '||tree_table_name||' WHERE parent_id=0) t;';  
 
+    RAISE INFO '%', 'INSERT INTO classified_instance_ping (id, jump, class, prob,tid) 
+        SELECT m.'||id_col_name||', t.id, 0, 0, t.tid 
+        FROM ' || encoded_table_name || ' m CROSS JOIN 
+        (SELECT DISTINCT tid,id FROM '||tree_table_name||' WHERE parent_id=0) t;';
+
     
     EXECUTE 'SELECT max(array_upper(tree_location,1)) FROM '||tree_table_name||';'  
         INTO max_level;
@@ -3259,6 +3264,8 @@ BEGIN
             ]
             )
         INTO curstmt;     
+
+        RAISE INFO '%', curstmt;
         EXECUTE curstmt;
         /*
          *  if the node (whose id is "jump") doesn't exist, 
@@ -3281,6 +3288,8 @@ BEGIN
                 ]
                 ) 
             INTO curstmt;
+            RAISE INFO '%', curstmt;
+
             EXECUTE curstmt;
         
             -- delete from the being classified data table
@@ -3296,13 +3305,18 @@ BEGIN
                 ]
                 ) 
             INTO curstmt;
+            RAISE INFO '%', curstmt;        
             EXECUTE curstmt;
         END LOOP;  
     END LOOP;
 
     EXECUTE 'INSERT INTO '||result_table_name||' SELECT * FROM '|| 
         table_names[table_pick] ||' WHERE jump = 0;';
+    RAISE INFO '%', 'INSERT INTO '||result_table_name||' SELECT * FROM '|| 
+        table_names[table_pick] ||' WHERE jump = 0;';
     EXECUTE 'INSERT INTO '||result_table_name||' SELECT * FROM '|| 
+        table_names[table_pick % 2 + 1] ||' WHERE jump = 0;';
+    RAISE INFO '%', 'INSERT INTO '||result_table_name||' SELECT * FROM '|| 
         table_names[table_pick % 2 + 1] ||' WHERE jump = 0;';
     
     IF (verbosity > 0) THEN  
