@@ -3070,7 +3070,7 @@ DECLARE
     remains_to_classify     INT;
     size_finished           INT;
     time_stamp              TIMESTAMP;
-    time_stamp_2            TIMESTAMP;
+    time_stamp2            TIMESTAMP;
     metatable_name          TEXT   := '';
     id_col_name             TEXT   := 'id';
     curr_level              INT    := 1;
