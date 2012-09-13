@@ -7,8 +7,11 @@ modules:
       depends: ['svec']
     - name: bayes
     - name: compatibility
+      depends: ['utilities']
     - name: conjugate_gradient
       depends: ['array_ops']
+    - name: convex
+      depends: ['utilities']
     - name: data_profile
       depends: ['sketch']
     - name: cart
@@ -28,4 +31,6 @@ modules:
     - name: svec
     - name: utilities
       depends: ['linalg']
-    - name: textfex_viterbi
+    - name: viterbi
+    - name: crf
+      depends: ['viterbi']

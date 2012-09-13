@@ -11,3 +11,6 @@
 #include "regress/regress.hpp"
 #include "sample/sample.hpp"
 #include "stats/stats.hpp"
+#include "convex/convex.hpp"
+#include "crf/linear_crf.hpp"
+#include "assoc_rules/assoc_rules.hpp"
