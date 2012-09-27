@@ -737,6 +737,22 @@ Datum svm_nd_update(PG_FUNCTION_ARGS)
 		nsvs++;
 		rho = rho - eta * (1 - nu);
 	} else {
+		for (i=0; i!=nsvs; i++) {
+			// we need to avoid underflows; the weight discounting
+			// never multiply a weight by less than 0.9, 
+			// and 1.15 * 0.9 > 1
+			if (weights[i] < 1.15 * DBL_MIN) { 
+				weights[i] = 0;
+				continue;
+			}
+			// we set lambda = 0.1 here, the exact value of lambda
+			// is mathematically irrelevant
+			weights[i] = weights[i] * (1 - 0.1*eta); 
+		}
+		
+		weights_arr = addNewWeight(weights_arr,0,nsvs);
+		supp_vecs_arr = addNewSV(supp_vecs_arr,ind,nsvs,ind_dim);
+		nsvs++;
 		rho = rho + eta * nu; 
 	}
 	
