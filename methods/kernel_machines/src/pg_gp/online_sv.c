@@ -750,9 +750,6 @@ Datum svm_nd_update(PG_FUNCTION_ARGS)
 			weights[i] = weights[i] * (1 - 0.1*eta); 
 		}
 		
-		weights_arr = addNewWeight(weights_arr,0,nsvs);
-		supp_vecs_arr = addNewSV(supp_vecs_arr,ind,nsvs,ind_dim);
-		nsvs++;
 		rho = rho + eta * nu; 
 	}
 	
