@@ -1,0 +1,283 @@
+# coding=utf-8
+
+"""
+@file dt.py_in
+
+@breif common functions written in PL/Python shared by C4.5 and RF
+@namespace dt
+"""
+"""
+m4_include(`SQLCommon.m4')
+
+m4_ifelse(
+    m4_eval(
+        m4_ifdef(`__GREENPLUM__', 1, 0) &&
+        __DBMS_VERSION_MAJOR__ * 100 + __DBMS_VERSION_MINOR__ < 401
+    ), 1,
+    `m4_define(`__GREENPLUM_PRE_4_1__')'
+)
+m4_ifelse(
+    m4_eval(                           
+        m4_ifdef(`__POSTGRESQL__', 1, 0) &&
+        __DBMS_VERSION_MAJOR__ < 9
+    ), 1,
+    `m4_define(`__POSTGRESQL_PRE_9_0__')'
+)
+                               
+m4_ifelse(
+    m4_eval(
+        m4_ifdef(`__GREENPLUM__', 1, 0) &&
+        __DBMS_VERSION_MAJOR__ * 10000 +
+        __DBMS_VERSION_MINOR__ * 100 +
+        __DBMS_VERSION_PATCH__ >= 40201
+    ), 1,
+    `m4_define(`__GREENPLUM_GE_4_2_1__')'
+)
+"""
+import datetime
+import math
+import plpy
+import dt_preproc as preproc
+import dt_utility as util
+
+def __delete_traininginfo(madlib_schema, tree_table):
+    """
+    @brief Remove the trained tree from training info table.
+
+    @param tree_table    The full name of the tree table.
+    """
+    stmt = """
+        DELETE FROM {madlib_schema}.training_info
+        WHERE result_table_oid = '{tree_table}'::regclass;
+        """.format(
+            madlib_schema = madlib_schema,
+            tree_table = tree_table)
+    plpy.execute(stmt)
+
+
+def __insert_into_traininginfo(
+        madlib_schema,
+        classifier_table_name,
+        result_table_name,
+        training_table_name,
+        training_metatable_name,
+        training_encoded_table_name,
+        validation_table_name,
+        how2handle_missing_value,
+        split_criterion,
+        sampling_percentage,
+        num_features_chosen,
+        num_trees):
+    """
+    @brief Insert the trained tree into training info table.
+
+    @param classifier_table_name         The name of the classifier.
+    @param result_table_name             The full name of the training result 
+                                         table.
+    @param training_table_name           The full name of the training table.
+    @param training_metatable_name       The full name of metatable.
+    @param training_encoded_table_name   The full name of the encoded table.
+    @param validation_table_name         The full name of the validation table.
+    @param how2handle_missing_value      The name of the routine to process 
+                                         unknown values.
+    @param split_criterion               The name of split criterion.
+    @param sampling_percentage           The percentage of bootstrap samples 
+                                         size in training dataset.
+    @param num_features_chosen           The number of features to split on 
+                                         each tree node.
+    @param num_trees                     The number of trees after completed.
+    """
+    if validation_table_name is None:
+        val_tbl_name_sql = "NULL::regclass,"
+    else:
+        val_tbl_name_sql = "'{validation_table_name}'::regclass,".format(
+            validation_table_name = validation_table_name)
+    
+    stmt = """
+        INSERT INTO {madlib_schema}.training_info VALUES
+        (
+            '{classifier_table_name}',
+            '{result_table_name}'::regclass,
+            '{training_table_name}'::regclass,
+            '{training_metatable_name}'::regclass,
+            '{training_encoded_table_name}'::regclass,
+            {val_tbl_name_sql}
+            '{how2handle_missing_value}',
+            '{split_criterion}',
+            {sampling_percentage}, 
+            {num_features_chosen},
+            {num_trees}
+        )
+        """.format(
+            madlib_schema = madlib_schema,
+            classifier_table_name = classifier_table_name,
+            result_table_name = result_table_name,
+            training_table_name = training_table_name,
+            training_metatable_name = training_metatable_name,
+            training_encoded_table_name = training_encoded_table_name,
+            val_tbl_name_sql = val_tbl_name_sql,
+            how2handle_missing_value = how2handle_missing_value,
+            split_criterion = split_criterion,
+            sampling_percentage = sampling_percentage,
+            num_features_chosen = num_features_chosen,
+            num_trees = num_trees)
+    plpy.execute(stmt)
+   
+
+def __get_encode_table_name(madlib_schema, tree_table):
+    """
+    @brief Get the encoding table name by tree table name.
+
+    @param tree_table    The full name of the tree table.
+
+    @return The full name of the encoded table.
+    """
+    stmt = """
+        SELECT {madlib_schema}.__regclass_to_text
+        (
+            training_encoded_table_oid
+        ) AS encode_table_name
+        FROM {madlib_schema}.training_info
+        WHERE result_table_oid = '{tree_table}'::regclass
+        """.format(
+            madlib_schema = madlib_schema,
+            tree_table = tree_table) 
+    encoded_table_name_t = plpy.execute(stmt)
+    return util.__get_query_value(encoded_table_name_t, "encode_table_name")
+
+
+def __is_valid_enc_table(madlib_schema, enc_tbl_name):
+    """
+    @brief Test if the given table is a valid encoded one.
+           A valid encoded table has the following characteristic:
+           + Its OID is in the column "training_encoded_table_oid"
+             of training_info table.
+           + It has 5 columns, whose names are id, fid, fval,
+             is_cont and class.
+           + The types of the 5 columns are BIGINT, INT, FLOAT8
+             BOOL and INT.
+
+    @param enc_tbl_name    The full name of the encoded table.
+
+    @return True if the given table is a valid encoded one.
+            False if it's an invalid encoded table.
+    """
+    ret = False
+    
+    # test if the table is in the training_info table
+    stmt = """
+        SELECT count(*) AS count
+        FROM {madlib_schema}.training_info
+        WHERE {madlib_schema}.__regclass_to_text
+        (training_encoded_table_oid) = '{enc_tbl_name}'
+        """.format(
+            madlib_schema = madlib_schema, 
+            enc_tbl_name = enc_tbl_name)
+    t = plpy.execute(stmt)
+    num_enc_table = util.__get_query_value(t, "count")
+
+    # test if the name and the type of a column are valid or not
+    stmt = """
+        SELECT count(*) AS count
+        FROM pg_attribute
+        WHERE attrelid= '{enc_tbl_name}'::regclass::oid AND
+              attnum > 0 AND
+              not attisdropped AND
+              attname in ('id', 'fid', 'fval', 'is_cont', 'class') AND
+              atttypid in ('int8'::regtype, 'int'::regtype, 
+              'float8'::regtype, 'bool'::regtype, 'int'::regtype)
+        """.format(enc_tbl_name = enc_tbl_name)
+    t = plpy.execute(stmt)
+    num_cols = util.__get_query_value(t, "count")
+
+    if (num_enc_table > 0) and (num_cols == 5):
+        ret = True
+    return ret
+
+
+def __get_metatable_name(madlib_schema, tree_table):
+    """
+    @brief Get the meta table name by the tree table name.
+
+    @param tree_table    The full name of the tree table.
+
+    @return The full name of the metatable. 
+    """
+    util.__assert_table(madlib_schema, tree_table, True)
+    util.__assert_table(
+        madlib_schema, 
+        str(madlib_schema) + ".training_info", True)
+
+    stmt = """
+        SELECT {madlib_schema}.__regclass_to_text
+        (training_metatable_oid) AS metatable_name
+        FROM {madlib_schema}.training_info
+        WHERE result_table_oid = '{tree_table}'::regclass
+        """.format(
+            madlib_schema = madlib_schema,
+            tree_table = tree_table)
+    metatable_name_t = plpy.execute(stmt)
+    return util.__get_query_value(metatable_name_t, "metatable_name")
+
+
+def __get_routine_id(madlib_schema, tree_table):
+    """
+    @brief Get the unknown values processing routine id.
+
+    @param tree_table    The full name of the tree table.
+
+    @return The encoded missing value processing routine id.
+    """
+    name = __get_routine_name(madlib_schema, tree_table)
+    if name == "ignore":
+        return 1
+    elif name == "explicit":
+        return 2
+    else:
+        plpy.error("__get_routine_id:" + name)
+
+
+def __get_routine_name(madlib_schema, tree_table):
+    """
+    @brief Get the unknown values processing routine name.
+           The valid routine name is 'ignore' or 'explicit'.
+
+    @param tree_table    The full name of the tree table.
+
+    @return The encoded missing value processing routine name.
+    """
+    util.__assert_table(
+        madlib_schema,
+        madlib_schema + ".training_info",
+        True)
+
+    stmt = """
+        SELECT how2handle_missing_value AS name
+        FROM {madlib_schema}.training_info
+        WHERE result_table_oid = '{tree_table}'::regclass
+        """.format(
+            madlib_schema = madlib_schema,
+            tree_table = tree_table)
+    name_t = plpy.execute(stmt)
+    return util.__get_query_value(name_t, "name")
+
+
+def __get_tree_table_name(madlib_schema, enc_table_name):
+    """
+    @brief Get the name of the tree table from the encoded table name.
+
+    @param enc_table_name  The encoded table name.
+
+    @return The full name of the tree table.
+    """ 
+    curstmt = """
+        SELECT {madlib_schema}.__regclass_to_text
+        (result_table_oid::regclass) AS name
+        FROM {madlib_schema}.training_info
+        WHERE training_encoded_table_oid = '{enc_table_name}'::regclass
+        LIMIT 1
+        """.format(
+            enc_table_name = enc_table_name, 
+            madlib_schema = madlib_schema)  
+    t = plpy.execute(curstmt)
+    return util.__get_query_value(t, "name")

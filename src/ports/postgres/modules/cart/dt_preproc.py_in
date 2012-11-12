@@ -1,0 +1,1490 @@
+# coding=utf-8
+
+"""
+@file dt_preproc.py_in
+
+@brief Functions used in C4.5, regression tree and random forest for data 
+       preprocessing
+
+@namespace dt_preproc
+"""
+m4_include(`SQLCommon.m4')
+
+m4_ifelse(
+    m4_eval(
+        m4_ifdef(`__GREENPLUM__', 1, 0) &&
+        __DBMS_VERSION_MAJOR__ * 100 + __DBMS_VERSION_MINOR__ < 401
+    ), 1,
+    `m4_define(`__GREENPLUM_PRE_4_1__')'
+)
+m4_ifelse( 
+    m4_eval(
+        m4_ifdef(`__POSTGRESQL__', 1, 0) && 
+        __DBMS_VERSION_MAJOR__ < 9
+    ), 1, 
+    `m4_define(`__POSTGRESQL_PRE_9_0__')'
+)
+m4_ifelse( 
+    m4_eval(
+        m4_ifdef(`__GREENPLUM__', 1, 0) &&
+        __DBMS_VERSION_MAJOR__ * 10000 + 
+        __DBMS_VERSION_MINOR__ * 100 +
+        __DBMS_VERSION_PATCH__ >= 40201
+    ), 1, 
+    `m4_define(`__GREENPLUM_GE_4_2_1__')'
+)
+
+import plpy
+import dt_utility as util
+import datetime
+import dt
+
+def __validate_input_table(
+        madlib_schema,
+        full_table_name,
+        feature_columns,
+        id_column,
+        class_column):
+    """
+    @brief Check if the input table has unsupported data type or not;
+           Check if the id column of input table has duplicated value or not.
+    @param full_table_name     The full table name.
+    @param feature_columns     The array including all feature names.
+    @param id_column           The name of the ID column.
+    @param class_column        The name of the class column.
+
+    @return If the table has unsupported data types, then raise exception
+            otherwise return nothing.
+    """
+
+    # find the first (LIMIT 1) unsupported data type if the input table has.
+    stmt = """
+        SELECT atttypid::regtype AS regtype
+        FROM pg_attribute
+        WHERE attrelid = '{full_table_name}'::regclass AND
+              attnum > 0                               AND
+              (not attisdropped)                       AND
+              atttypid NOT IN
+              (
+                  SELECT unnest
+                  (
+                      ARRAY
+                      [
+                          'SMALLINT'::regtype::oid,
+                          'INT'::regtype::oid,
+                          'BIGINT'::regtype::oid,
+                          'FLOAT8'::regtype::oid,
+                          'REAL'::regtype::oid,
+                          'DECIMAL'::regtype::oid,
+                          'INET'::regtype::oid,
+                          'CIDR'::regtype::oid,
+                          'MACADDR'::regtype::oid,
+                          'BOOLEAN'::regtype::oid,
+                          'CHAR'::regtype::oid,
+                          'VARCHAR'::regtype::oid,
+                          'TEXT'::regtype::oid,
+                          '"char"'::regtype::oid,
+                          'DATE'::regtype::oid,
+                          'TIME'::regtype::oid,
+                          'TIMETZ'::regtype::oid,
+                          'TIMESTAMP'::regtype::oid,
+                          'TIMESTAMPTZ'::regtype::oid,
+                          'INTERVAL'::regtype::oid
+                      ]   
+                  ) 
+              )
+        """.format(full_table_name = full_table_name)
+    # index = 1
+    if feature_columns is not None and len(feature_columns) > 0:
+        # If user do not specify feature columns, we use all those columns.
+        # Otherwise, we just need to check those specified columns.
+        all_columns = ",".join(
+            "'" + column + "'" for column in feature_columns)
+        all_columns += "," + "'" + str(id_column) + "'"
+        all_columns += "," + "'" + str(class_column) + "'"        
+        stmt += " AND attname IN ({all_columns})".format(
+            all_columns = all_columns)
+    stmt += " LIMIT 1;"
+    rec_t = plpy.execute(stmt)
+    rec_regtype = util.__get_query_value(rec_t,"regtype")
+    
+    if rec_regtype is not None:
+        # Print the first unsupported data type, amd supported types.
+        plpy.error(
+            """
+            Unsupported data type [{atttypid}]. Supported types include:
+            SMALLINT, INT, BIGINT, FLOAT8, REAL,
+            DECIMAL, INET, CIDR, MACADDR, BOOLEAN,
+            CHAR, VARCHAR, TEXT, 'char',
+            DATE, TIME, TIMETZ, TIMESTAMP, TIMESTAMPTZ, and INTERVAL
+            """.format(atttypid = rec_regtype))
+
+    stmt = """
+        SELECT {id_column} AS n
+        FROM {full_table_name}
+        GROUP BY {id_column}
+        HAVING COUNT({id_column}) > 1
+        LIMIT 1
+        """.format(
+            id_column = id_column,
+            full_table_name = full_table_name)      
+    rec_t = plpy.execute(stmt)
+    
+    util.__assert(
+        rec_t is None or rec_t.nrows() == 0, 
+        ("The training table " + str(full_table_name) + 
+         " must not have duplicated id"))
+
+
+def __get_classtable_name(madlib_schema, metatable_name):
+    """
+    @brief Get the class table name by the metatable name.
+
+    @param metatable_name    The full name of the metatable.
+
+    @return The name of the class table
+    """
+    util.__assert_table(madlib_schema, metatable_name, True)
+
+    sql = """
+        SELECT {madlib_schema}.__regclass_to_text(table_oid) AS table_name
+        FROM {metatable_name}
+        WHERE column_type = 'c';
+        """.format(
+              metatable_name = metatable_name,
+              madlib_schema = madlib_schema)
+    t = plpy.execute(sql)
+    return util.__get_query_value(t, "table_name")
+
+
+def __drop_metatable(madlib_schema, metatable_name):
+    """
+    @brief Drop the metatable and KV tables 
+           for the features and the class.
+ 
+    @param meta_tbl_name The full name of the metatable.
+    """
+    if metatable_name is None:
+        return
+    util.__assert_table(madlib_schema, metatable_name,True)
+    records_t = plpy.execute(
+        """
+        SELECT {madlib_schema}.__regclass_to_text(table_oid) AS table_name
+        FROM
+        (
+            SELECT table_oid
+            FROM {metatable_name}
+            WHERE table_oid IS NOT NULL
+            GROUP BY table_oid
+        ) t
+        """.format(
+            metatable_name = metatable_name, 
+            madlib_schema = madlib_schema))
+    for record in records_t:
+        name = str(record["table_name"])      
+        plpy.execute(
+            "DROP TABLE IF EXISTS {name} CASCADE;".format(name = name)) 
+    plpy.execute(
+        "DROP TABLE " + metatable_name + " CASCADE;")
+
+
+def __create_metatable(madlib_schema, metatable_name):
+    """
+    @brief Create the metatable
+
+    @param metatable_name    The full name of the metatable.
+    """   
+    util.__assert(
+        len(util.__strip_schema_name(metatable_name)) <= 63,
+        "The maximum length of '{metatable_name}' is 63".format(
+            metatable_name = util.__strip_schema_name(metatable_name)))
+
+    plpy.execute(
+        "DROP TABLE IF EXISTS {metatable_name} CASCADE;".format(
+            metatable_name = metatable_name))
+
+    # must not be existence
+    util.__assert_table(madlib_schema, metatable_name, False)
+
+    plpy.execute(
+        """
+        CREATE TABLE {metatable_name} 
+        (
+            id SERIAL,
+            column_name TEXT,
+            column_type CHAR,
+            is_cont BOOLEAN,
+            table_oid OID,
+            num_dist_value INT       
+        ) m4_ifdef(`__GREENPLUM__',`DISTRIBUTED BY (id)');
+        """.format(metatable_name = metatable_name))
+
+
+def __insert_into_metatable(
+        madlib_schema,
+        metatable_name,
+        col_index,
+        column_name,
+        column_type,
+        is_cont,
+        table_name,
+        num_dist_value):
+    """
+    @brief Insert a record to the metatable
+           A row in the metatable represents a column's information
+
+    @param metatable_name    The full name of the metatable. 
+    @param column_name       The name of the column.
+    @param column_type       The type of the column.
+                             'i' means id, 'c' means class, 'f' means 
+                             feature.
+    @param is_cont           True if the column is continuous.
+    @param table_name        The full name of key-value table for the 
+                             column.
+                             The OID of this table will be stored.
+    @param num_dist_value    The number of distinct values for the column.
+
+    @note                    The null value will be incluede in the distinct 
+                             values.
+    """
+    util.__assert(
+        column_type == 'f' or column_type == 'i' or column_type == 'c',
+        "column type must be 'f', 'i' or 'c'")
+    
+    curstmt = """
+        INSERT INTO {metatable_name} VALUES
+        (
+            {col_index},
+            '{column_name}',
+            '{column_type}',
+            '{is_cont}',
+            {table_name}::regclass,
+            {num_dist_value}
+        );
+        """.format(
+            metatable_name = metatable_name,
+            col_index = col_index,
+            column_name = column_name,
+            column_type = column_type,
+            is_cont = str(is_cont),
+            table_name = util.__str_to_sql(table_name),
+            num_dist_value = str(num_dist_value))      
+    plpy.execute(curstmt)
+
+
+def __validate_metatable(madlib_schema, meta_tbl_name):
+    """
+    @brief Validate if the metatable exists or not.
+           Validate if the tables in "table_oid" column exists or not.
+
+    @param meta_tbl_name     The full name of the metatable.
+    """
+    util.__assert_table(madlib_schema, meta_tbl_name, True)
+
+    # if one of those KV tables doesn't exist,
+    # we raise exception
+    curstmt = """
+        SELECT {madlib_schema}.__assert_table
+        (
+            {madlib_schema}.__regclass_to_text(table_oid), 't'
+        )
+        FROM
+        (
+            SELECT table_oid
+            FROM {meta_tbl_name}
+            WHERE table_oid IS NOT NULL
+            GROUP BY table_oid
+        ) t
+        """.format(
+            madlib_schema = madlib_schema,
+            meta_tbl_name = meta_tbl_name)
+    plpy.execute(curstmt)
+
+
+def __distinct_feature_value(madlib_schema, metatable_name, feature_id):
+    """
+    @brief Get the number of distinct values for the feature with given ID.
+
+    @param metatable_name    The full name of the metatable.
+    @param feature_id        The ID of the feature in the metatable.
+
+    @return                  The number of the distinct values for the given 
+                             feature.
+    """
+    curstmt = """
+        SELECT num_dist_value AS distinct_feature_value
+        FROM {metatable_name}
+        WHERE column_type = 'f' AND id = {feature_id};
+        """.format(
+            metatable_name = metatable_name,
+            feature_id = str(feature_id))
+    t = plpy.execute(curstmt)
+    return util.__get_query_value(t, "distinct_feature_value")
+
+
+def __num_of_feature(madlib_schema, metatable_name):
+    """
+    @brief Get the number of features
+
+    @param metatable_name    The full name of the metatable.
+
+    @return The number of features in the training table.
+    """
+    curstmt = """
+        SELECT COUNT(*) AS count
+        FROM {metatable_name}
+        WHERE column_type = 'f'; 
+        """.format(metatable_name = metatable_name)    
+    result_t = plpy.execute(curstmt)
+    return util.__get_query_value(result_t, "count")
+
+
+def __num_of_class(madlib_schema, metatable_name):
+    """
+    @brief Get the number of distinct class values.
+
+    @param metatable_name    The full name of the metatable.
+
+    @return The number of class labels in the training table.
+    """
+    curstmt = """
+        SELECT {madlib_schema}.__regclass_to_text(table_oid) AS table_oid
+        FROM {metatable_name}
+        WHERE column_type = 'c';
+        """.format(
+            metatable_name = metatable_name,
+            madlib_schema = madlib_schema)
+    class_table_name_t = plpy.execute(curstmt)
+    class_table_name = util.__get_query_value(class_table_name_t, "table_oid")
+
+    curstmt = """
+        SELECT COUNT(code) AS count
+        FROM {class_table_name};
+        """.format(class_table_name = class_table_name)
+    result_t = plpy.execute(curstmt)
+
+    return util.__get_query_value(result_t, "count")
+
+
+def __get_feature_name(madlib_schema, feature_index, metatable_name):
+    """
+    @brief Get the feature name by the specified feature ID.
+
+    @param feature_name      The name of the feature.
+    @param metatable_name    The full name of the metatable.
+
+    @return The feature name.
+    """
+    curstmt = """
+        SELECT column_name 
+        FROM {metatable_name}
+        WHERE id = {feature_index} AND column_type = 'f';
+        """.format(
+            metatable_name = metatable_name,
+            feature_index = feature_index)
+    result_t = plpy.execute(curstmt)
+
+    return util.__get_query_value(result_t, "column_name")
+    
+
+def __get_column_value(
+        madlib_schema,
+        column_index,
+        code,
+        column_type,
+        metatable_name):
+    """
+    @breif Get the column value by the specified column ID and key.
+
+    @param column_index      The ID of the column.
+    @param code              The dictionary order of the column value.
+    @param column_type       The type of the column.
+                            'i' means id, 'c' means class, 'f' means feature.
+    @param metatable_name    The full name of the metatable.
+
+    @return The column's value corresponding to the give key.
+    """
+    tmp_txt = " WHERE column_type = 'c'"
+
+    util.__assert(
+        code is not None, 
+        "the code of the value should not be null")
+
+    curstmt = ""
+    if column_type != 'c':
+        tmp_txt = """ 
+            WHERE id = {column_index} AND column_type = '{column_type}' 
+            """.format(
+                column_index = column_index,
+                column_type = column_type)
+    
+    curstmt = """
+        SELECT ARRAY
+               [
+                   column_name,
+                   {madlib_schema}.__regclass_to_text(table_oid) AS table_oid
+               ]
+        FROM {metatable_name}
+        {tmp_txt}    
+        """.format(
+            metatable_name = metatable_name,
+            tmp_txt = tmp_txt,
+            madlib_schema = madlib_schema)
+    names_t = plpy.execute(curstmt)
+
+    table_name = util.__get_query_value(names_t, "table_oid")
+    column_name = util.__get_query_value(names_t, "column_name")
+
+    util.__assert(column_name is not None, "No such column name")
+    util.__assert(table_name is not None, "No such table name")
+
+    curstmt = """
+        SELECT fval
+        FROM {table_name}
+        WHERE code = {column_name};
+        """.format(
+            table_name = table_name, 
+            column_name = column_name)
+    t = plpy.execute(curstmt)
+    result = str(util.__get_query_value(t, "fval")) 
+  
+    return util.__coalesce(result, "null")
+
+
+def __get_feature_value(
+        madlib_schema,
+        feature_index,
+        code,
+        metatable_name):
+    """
+    @breif Get the feature value by the specified column ID and key.
+
+    @param feature_index      The ID of the column.
+    @param key               The key of the column value.
+    @param metatable_name    The full name of the metatable.
+
+    @return The value of specified key of the feature
+            whose id specified in feature_index.
+    """
+    return __get_column_value(
+        madlib_schema, 
+        feature_index, 
+        code, 
+        'f',
+        metatable_name)
+    
+
+def __get_id_column_name(madlib_schema, metatable_name):
+    """
+    @breif Get ID column name.
+
+    @param metatable_name    The full name of the metatable.
+
+    @return The ID column name.
+    """
+    util.__assert_table(madlib_schema, metatable_name, True)
+
+    curstmt = """
+        SELECT column_name
+        FROM {metatable_name}
+        WHERE column_type = 'i'
+        LIMIT 1;
+        """.format(metatable_name = metatable_name)
+    result_t = plpy.execute(curstmt)
+    
+    return util.__get_query_value(result_t, "column_name") 
+
+
+def __get_class_column_name(madlib_schema, metatable_name):
+    """
+    @breif Get the class column name.
+
+    @param metatable_name    The full name of the metatable.
+
+    @return The class column name.
+    """
+    util.__assert_table(madlib_schema, metatable_name, True)
+    
+    curstmt = """
+        SELECT column_name AS column_name
+        FROM {metatable_name}
+        WHERE column_type = 'c'
+        LIMIT 1;
+        """.format(metatable_name = metatable_name)
+    result_t = plpy.execute(curstmt)
+
+    return util.__get_query_value(result_t, "column_name")
+
+
+def __get_class_value(madlib_schema, code, metatable_name):
+    """
+    @breif Get the class value by the specified key.
+
+    @param key               The key of the class value.
+    @param metatable_name    The full name of the metatable.
+
+    @return The class value corresponding to the key.
+    """
+    return __get_column_value(madlib_schema, 0, code, 'c', metatable_name)
+
+
+def __breakup_table(
+        madlib_schema,
+        input_tbl_name,
+        breakup_tbl_name,
+        kv_cls_name,
+        id_col_name,
+        cls_col_name,
+        cls_is_cont,
+        cls_col_enc_name,
+        attr_col_names,
+        is_conts,
+        h2hmv_routine_id,
+        verbosity):
+    """
+    @brief breakup each record from the training table.
+           For example, we have the training table t(id, f1, f2, f3, class),
+           then the breakup table is bt(id, fid, fval, is_cont, class).
+           The id column of the two tables is the same. Each feature will be
+           encoded to continuous numeric number. Assume that t has values
+           (1, 'a', 1, 10, '+')
+           (2, 'b', 2, 8, '-')
+           (3, 'd', null, 2, '+')
+           and all of them are discrete features, then the values of bt are
+           (1, 1, 'a', 'f', '+')
+           (2, 1, 'b', 'f', '-')
+           (3, 1, 'd', 'f', '+')
+           (1, 2, 1, 'f', '+')
+           (2, 2, 2, 'f', '-')
+           (3, 2, null, 'f', '+')
+           (1, 3, 10, 'f', '+')
+           (2, 3, 8, 'f', '-')
+           (3, 3, 2, 'f', '+')
+ 
+    @param input_tbl_name      The full name of the input training table.
+    @param breakup_tbl_name    The name of the breakup table.
+    @param kv_cls_name         The name of the key-value table for class column.
+    @param id_col_name         The name of the ID column.
+    @param attr_col_names      The array contains all the features' names.
+    @param is_conts            The subscript of the array denotes the feature 
+                               index.
+                               Each value of the array denotes the feature is
+                               continuous ('t') or discrete ('f')
+    @param verbosity           > 0 means this function runs in verbose mode.
+
+    @return The name of the breakup table, which will be used to generate the 
+            encoded table.
+    """ 
+    fval_txt = "fval"
+    exec_begin = datetime.datetime.now()
+    
+    plpy.execute(
+        "DROP TABLE IF EXISTS {breakup_tbl_name}".format(
+            breakup_tbl_name = breakup_tbl_name))
+m4_changequote(`>>>', `<<<')
+m4_ifdef(>>>__GREENPLUM_GE_4_2_1__<<<, >>>
+    # if the DB is GPDB and its version is greater than or equal
+    # to 4.2, then we will use RLE compression for the encoded table.
+    if cls_is_cont:
+        class_clause = (cls_col_enc_name + 
+                        '   FLOAT  ENCODING (compresstype=RLE_TYPE)')
+    else:
+        class_clause = (cls_col_enc_name + 
+                        '   INT    ENCODING (compresstype=RLE_TYPE)')
+    curstmt = """
+        CREATE TEMP TABLE {breakup_tbl_name}
+        (             
+            id      BIGINT ENCODING (compresstype=RLE_TYPE),
+            fid     INT    ENCODING (compresstype=RLE_TYPE),
+            fval    TEXT   ENCODING (compresstype=RLE_TYPE),
+            is_cont BOOL   ENCODING (compresstype=RLE_TYPE),
+            {class_clause}
+        )
+        WITH(appendonly=true, orientation=column)
+        DISTRIBUTED BY(id)
+        """.format(
+            breakup_tbl_name = breakup_tbl_name,
+            class_clause = class_clause)
+<<<, >>>
+    if cls_is_cont:    
+        class_clause = cls_col_enc_name + ' FLOAT'
+    else:
+        class_clause = cls_col_enc_name + ' INT'
+    curstmt = """
+        CREATE TEMP TABLE {breakup_tbl_name}
+        (
+            id      BIGINT,
+            fid     INT,
+            fval    TEXT,
+            is_cont BOOL,
+            {class_clause}
+        )
+        m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)')
+        """.format(
+            breakup_tbl_name = breakup_tbl_name,
+            class_clause = class_clause)
+<<<)
+m4_changequote(>>>`<<<, >>>'<<<)
+    plpy.execute(curstmt)
+    
+    # the supported missing value representation (' ', '?' and NULL) will
+    # be replace with NULL for easy processing later.
+    # the function __to_char is needed because on some databases an explicit
+    # cast to text is unavailable.
+    where_txt = ""
+    if h2hmv_routine_id == 1:
+        where_txt = """ 
+            WHERE NULLIF(NULLIF(btrim(fval, ' '), '?'), '') 
+            IS NOT NULL
+            """ 
+    else:
+        fval_txt = """
+            CASE WHEN NULLIF(NULLIF(btrim(fval, ' '), '?'), '') IS NULL 
+                 THEN NULL
+                 ELSE fval
+            END
+            """ 
+
+    if cls_col_name is None:
+        # if the kv_cls_name is null, then the class column will be null
+        curstmt = """
+            INSERT INTO {breakup_tbl_name}
+            (
+                id, fid, fval, is_cont, {cls_col_enc_name}
+            )
+            SELECT id, fid, {fval_txt} as fval, is_cont, {cls_col_enc_name}
+            FROM
+            (
+                SELECT {id_col_name},
+                       generate_series(1, {is_conts_upper}) as fid,
+                       unnest
+                       (
+                           array
+                           [
+                              {madlib_schema}.__to_char({attr_col_names})
+                           ]
+                       ) AS fval,
+                       unnest(array['{is_conts}'::BOOL]::BOOL[]) as is_cont, 
+                       NULL AS {cls_col_enc_name}
+                FROM {input_tbl_name} t1
+            ) t
+            {where_txt}
+            """.format(
+                madlib_schema = madlib_schema,
+                breakup_tbl_name = breakup_tbl_name,
+                fval_txt = fval_txt,
+                id_col_name = id_col_name,
+                is_conts_upper = len(is_conts),
+                attr_col_names = "), {madlib_schema}.__to_char(".format(
+                    madlib_schema = madlib_schema).join(
+                        util.__coalesce(name, "null") 
+                        for name in attr_col_names),
+                is_conts = "','".join(str(cont) for cont in is_conts),
+                input_tbl_name = input_tbl_name,
+                where_txt = where_txt,
+                cls_col_enc_name = cls_col_enc_name)
+    else:
+        if cls_is_cont:
+            class_sql = "{cls_col_name} AS {cls_col_enc_name}".format(
+                cls_col_name = cls_col_name,
+                cls_col_enc_name = cls_col_enc_name)
+            where_sql = ""
+            from_sql = "{input_tbl_name}".format(
+                input_tbl_name = input_tbl_name)
+        else:
+            class_sql = "code AS " + cls_col_enc_name
+            where_sql = """
+                WHERE {madlib_schema}.__to_char(
+                    t1.{cls_col_name}
+                ) = t2.fval
+                """.format(
+                    madlib_schema = madlib_schema,
+                    cls_col_name = cls_col_name)
+            from_sql = "{input_tbl_name} t1, {kv_cls_name} t2".format(
+                input_tbl_name = input_tbl_name,
+                kv_cls_name = kv_cls_name)
+
+        curstmt = """
+            INSERT INTO {breakup_tbl_name}
+            (
+                id, fid, fval, is_cont, {cls_col_enc_name}
+            )
+            SELECT id, fid, {fval_txt} as fval, is_cont, {cls_col_enc_name}
+            FROM
+            (
+                SELECT {id_col_name},
+                       generate_series(1, {is_conts_upper}) AS fid,
+                       unnest
+                       (
+                           array
+                           [
+                               {madlib_schema}.__to_char({attr_col_names})
+                           ]
+                       ) AS fval,
+                       unnest
+                       (
+                           array[{is_conts}]::BOOL[]
+                       ) AS is_cont,
+                       {class_sql}
+                FROM {from_sql}
+                {where_sql}
+            ) t
+            {where_txt}
+            """.format(
+                madlib_schema = madlib_schema,
+                breakup_tbl_name = breakup_tbl_name,
+                fval_txt = fval_txt,
+                id_col_name = id_col_name,
+                is_conts_upper = len(is_conts),
+                attr_col_names = "), {madlib_schema}.__to_char(".format(
+                    madlib_schema = madlib_schema).join(
+                        name for name in attr_col_names),
+                    is_conts = ",".join(
+                        ("'" + str(is_cont) + "'::BOOL") 
+                        for is_cont in is_conts),
+                class_sql = class_sql,
+                from_sql = from_sql,
+                where_sql = where_sql,
+                where_txt = where_txt,
+                cls_col_enc_name = cls_col_enc_name)   
+    plpy.execute(curstmt)
+
+    if verbosity > 0:
+        plpy.info(curstmt)
+        plpy.info(
+            ("time of breaking up the training table:" +
+            str(datetime.datetime.now() - exec_begin)))
+
+
+def __gen_vertical_encoded_table(
+        madlib_schema,
+        breakup_tbl_name,
+        enc_tbl_name,
+        kv_attr_name,
+        is_tbl_tmp,
+        cls_is_cont,
+        cls_col_enc_name,
+        verbosity):
+    """
+    @brief Generate the vertical encoded table from the breakup table.
+
+    @param breakup_tbl_name    The full name of the breakup table.
+    @param enc_tbl_name        The name of the encoded table. its schema is:
+                               id BIGINT,
+                               fid INT,
+                               fval FLOAT8,
+                               is_cont BOOL,
+                               class INT
+    @param kv_attr_name        The name of the key-value table contains the 
+                               encoded result for all the features. For 
+                               continuous feature, it kept the average value
+                               of it if in 'explicit' mode;
+                               nothing will kept if in 'ignore' mode.
+    @param is_tbl_tmp          If ture we will create the encoded table as a
+                               temp one.
+    @param verbosity           > 0 means this function runs in verbose mode.
+    """
+    tmp_txt = ''
+    if is_tbl_tmp:
+        tmp_txt = ''
+
+    if cls_is_cont:
+        class_type = 'FLOAT8'
+    else:
+        class_type = 'INT'
+
+    plpy.execute("DROP TABLE IF EXISTS " + enc_tbl_name)
+m4_changequote(`>>>', `<<<')
+m4_ifdef(>>>__GREENPLUM_GE_4_2_1__<<<, >>>
+    curstmt = """
+        CREATE {tmp_txt} TABLE {enc_tbl_name}
+        (
+            id      BIGINT  ENCODING (compresstype=RLE_TYPE),
+            fid     INT     ENCODING (compresstype=RLE_TYPE),
+            fval    FLOAT8  ENCODING (compresstype=RLE_TYPE),
+            is_cont BOOL    ENCODING (compresstype=RLE_TYPE),
+            {cls_col_enc_name} {class_type} ENCODING (compresstype=RLE_TYPE)
+        )
+        WITH(appendonly=true, orientation=column)
+        DISTRIBUTED BY(id)
+        """.format(
+            tmp_txt = tmp_txt,
+            enc_tbl_name = enc_tbl_name,
+            cls_col_enc_name = cls_col_enc_name,
+            class_type = class_type)
+<<<, >>>
+    curstmt = """
+        CREATE {tmp_txt} TABLE {enc_tbl_name}
+        (
+            id      BIGINT,
+            fid     INT,
+            fval    FLOAT8,
+            is_cont BOOL,
+            {cls_col_enc_name}   {class_type}
+        )
+        m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)')
+        """.format(
+            tmp_txt = tmp_txt,
+            enc_tbl_name = enc_tbl_name,
+            cls_col_enc_name = cls_col_enc_name,
+            class_type = class_type)
+<<<)
+m4_changequote(>>>`<<<, >>>'<<<)
+    if verbosity > 0:
+        plpy.info(curstmt)
+    plpy.execute(curstmt)
+
+    # Generating the encoded table through join the breakup table with
+    # the KV table for all the features
+    curstmt = """
+        INSERT INTO {enc_tbl_name}(id, fid, fval, is_cont, {cls_col_enc_name})
+        SELECT p.id AS id, p.fid AS fid,
+               CASE WHEN (p.is_cont AND p.fval IS NOT NULL) 
+                    THEN
+                        p.fval::FLOAT8
+                    ELSE
+                        m.code::FLOAT8
+               END AS fval,
+               p.is_cont AS is_cont,
+               p.{cls_col_enc_name}::{class_type} AS {cls_col_enc_name} 
+        FROM
+             {breakup_tbl_name} p LEFT JOIN {kv_attr_name} m
+        ON   m.fid = p.fid AND
+             (coalesce(m.fval, '') = (coalesce(p.fval, '')))
+        """.format(
+            enc_tbl_name = enc_tbl_name,
+            breakup_tbl_name = breakup_tbl_name,
+            kv_attr_name = kv_attr_name,
+            cls_col_enc_name = cls_col_enc_name,
+            class_type = class_type)
+    if verbosity > 0:
+        plpy.info(curstmt)
+    plpy.execute(curstmt)
+
+
+def __encode_columns(
+        madlib_schema,
+        kv_attr_name,
+        breakup_tbl_name,
+        h2hmv_routine_id,
+        verbosity):
+    """
+    @brief Encode the continuous and discrete features and the class column.
+           In 'ignore' mode, for each discrete feature/class, we will use
+           continuous integer to encode each distinct value (null value
+           will be excluded). Continuous feature will not be processed.
+           In 'explicit' mode, null value will be included for discrete
+           feature. For continuous feature, null value will be replaced by
+           the average value of this feature.
+
+    @param kv_attr_name        The name of the key-value table contains the 
+                               encoded result for all the features. For 
+                               continuous feature, it kept the average value
+                               of it if in 'explicit' mode;
+                               nothing will kept if in 'ignore' mode.
+    @param breakup_tbl_name    The name of the breakup table from raw training
+                               table.
+    @param h2hmv_routine_id    The ID of the routine which specifies
+                               How to handle missing value(h2hmv).
+    @param verbosity           > 0 means this function runs in verbose mode.
+
+    """
+    
+    # This table will be used to generate the KV table
+    # for the discrete features and retrieve the number
+    # of distinct values for a feature outside of this
+    # function. Therefore, don't drop this table in this
+    # function.
+    plpy.execute("DROP TABLE IF EXISTS tmp_dist_table")
+    curstmt = """
+        CREATE TEMP TABLE tmp_dist_table AS
+        SELECT fid, fval, is_cont
+        FROM {breakup_tbl_name}
+        GROUP BY fid, fval, is_cont
+        """.format(breakup_tbl_name = breakup_tbl_name)
+    if verbosity > 0:
+        plpy.info(curstmt)
+    plpy.execute(curstmt)
+
+    # create the KV table for all the features and
+    # populate the keys of the discrete features
+    # to the table.
+    plpy.execute("DROP TABLE IF EXISTS " + kv_attr_name)
+    curstmt = """
+        CREATE TABLE {kv_attr_name}(fid, fval, code) AS
+        SELECT
+               fid,
+               fval,
+               (rank() OVER (PARTITION BY fid ORDER BY fval))::FLOAT8 
+               AS code
+        FROM tmp_dist_table
+        WHERE (NOT is_cont)
+        m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (fid, fval)')
+        """.format(kv_attr_name = kv_attr_name)
+    if verbosity > 0:
+        plpy.info(curstmt)
+    plpy.execute(curstmt)
+   
+    # In "explicit" mode, we need to replace the missing
+    # value with the average value. Therefore, we keep
+    # those values to the KV table.
+    if h2hmv_routine_id == 2:
+        curstmt = """
+            INSERT INTO {kv_attr_name}(fid, fval, code)
+            SELECT
+                   fid,
+                   null,
+                   coalesce(avg(fval::FLOAT8), 0.0)
+            FROM
+                 {breakup_tbl_name} s
+            WHERE is_cont
+            GROUP BY fid
+            """.format(
+                kv_attr_name = kv_attr_name,
+                breakup_tbl_name = breakup_tbl_name)
+        if verbosity > 0:
+            plpy.info(curstmt)
+        plpy.execute(curstmt)
+
+
+def __gen_horizontal_encoded_table(
+        madlib_schema,
+        hor_tbl_name,
+        ver_tbl_name,
+        attr_count,
+        cls_is_cont,
+        cls_col_enc_name,
+        verbosity):
+    """
+    @brief Generate the horizontal table from a given vertical table.
+
+    @param hor_tbl_name          The full name of the horizontal table.
+    @param ver_tbl_name          The full name of the vertical table.
+    @param meta_tbl_name         The full name of the meta data table.
+    @param verbosity             > 0 means this function runs in verbose mode.
+    """
+    exec_begin = datetime.datetime.now()
+
+    plpy.execute("DROP TABLE IF EXISTS " + hor_tbl_name)
+    if cls_is_cont:
+        class_type = 'FLOAT8'
+    else:
+        class_type = 'INT'
+    curstmt = """
+        CREATE TEMP TABLE {hor_tbl_name}(id, fvals, {cls_col_enc_name}) AS
+        SELECT
+               id,
+               {madlib_schema}.__array_indexed_agg(fval, {attr_count}, fid)
+               AS fvals,
+               min({cls_col_enc_name})::{class_type} AS {cls_col_enc_name}
+        FROM {ver_tbl_name}
+        GROUP BY id
+        m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)')
+        """.format(
+            madlib_schema = madlib_schema,
+            hor_tbl_name = hor_tbl_name,
+            attr_count = attr_count,
+            ver_tbl_name = ver_tbl_name,
+            cls_col_enc_name = cls_col_enc_name,
+            class_type = class_type)
+    plpy.execute(curstmt)
+    
+    if verbosity > 0:
+        plpy.info(
+            ("time of generating horizontal table from vertical table:" + 
+            str(datetime.datetime.now() - exec_begin)))
+
+
+def __encode_training_table(
+        madlib_schema,
+        input_tbl_name,
+        id_col_name,
+        feature_names,
+        cls_col_name,
+        cls_is_cont,
+        cls_col_enc_name,
+        cont_attr_names,
+        enc_table_name,
+        meta_tbl_name,
+        h2hmv_routine_id,
+        verbosity):
+    """
+    @breif Encode a tabular table.
+
+    @param input_table_name      The full name of the input table.
+    @param id_column_name        The name of id column.
+    @param feature_names         An array contains all the feature. If it's 
+                                 null, we will get all the columns of the
+                                 input table.
+    @param cls_col_name          The name of class column.
+    @param cls_is_cont           Specify the class or predict value column is
+                                 continuous. If this param is true, this
+                                 function is used for encoding for regression
+                                 tree, or it is for C45 or random forest
+    @param cls_col_enc_name      Specify the name of class or predict value 
+                                 column after encoding.
+    @param cont_column_names     An array contains all the continuous feature.
+                                 Null means no continuous feature.
+    @param encoded_table_name    The full name of the encoded table.
+    @param metatable_name        The full name of the metatable.
+    @param h2hmv_routine_id      The ID of the routine which specifies
+                                 How to handle missing value(h2hmv).
+    @param verbosity             > 0 means this function runs in verbose mode.
+    
+    @return The full name of the encoded table.
+
+    @note The name convension of the table for a column is:
+          metatable_name || '_' || col_index
+          col_index is start from 1, and end at 9999
+    """
+    kv_attr_name = enc_table_name + "_col"
+    kv_cls_name = enc_table_name + "_class"
+    breakup_tbl_name = "tmp_breakup_table"
+    is_conts = []
+    class ret:pass
+
+    exec_begin = datetime.datetime.now()
+    begin_t = datetime.datetime.now()
+
+    __validate_input_table(
+        madlib_schema, 
+        input_tbl_name, 
+        feature_names, 
+        id_col_name,
+        cls_col_name)
+
+    __create_metatable(madlib_schema, meta_tbl_name)
+    
+    # retrieve all the features' names
+    if feature_names is None:
+m4_changequote(`>>>', `<<<')
+m4_ifdef(`__HAS_ORDERED_AGGREGATES__', >>>
+        curstmt = """
+            SELECT array_agg(attname ORDER BY attname) as attnames
+            FROM   pg_attribute
+            WHERE  attrelid = '{input_tbl_name}'::regclass AND 
+                   attnum > 0 AND
+                   attname <> '{id_col_name}' AND
+                   attname <> '{cls_col_name}' AND
+                   NOT attisdropped;
+            """.format(
+                input_tbl_name = input_tbl_name,
+                id_col_name = id_col_name,
+                cls_col_name = cls_col_name)  
+        t = plpy.execute(curstmt)
+        attr_col_names = util.__get_query_value(t, "attnames")
+<<<, >>>
+        curstmt = """
+            SELECT ARRAY
+            (
+                SELECT attname
+                FROM   pg_attribute
+                WHERE  attrelid = '{input_tbl_name}'::regclass AND 
+                       attnum > 0 AND
+                       attname <> '{id_col_name}' AND
+                       attname <> '{cls_col_name}' AND
+                       NOT attisdropped
+                ORDER BY attname
+                LIMIT ALL
+            ) AS arr_attname
+            """.format(
+                input_tbl_name = input_tbl_name,
+                id_col_name = id_col_name,
+                cls_col_name = cls_col_name)
+        t = plpy.execute(curstmt)
+        attr_col_names = util.__get_query_value(t, "arr_attname")
+<<<)
+m4_changequote(>>>`<<<, >>>'<<<) 
+    else:
+        attr_col_names = sorted(feature_names)
+    
+    # an array contains if a feature is continuous or not
+    # the subscript is corresponding to the feature's ID
+    if cont_attr_names is not None:
+        for name in attr_col_names:
+            if name in cont_attr_names:
+                is_conts.append(True)
+            else:
+                is_conts.append(False)
+    else:
+        for name in attr_col_names:
+            is_conts.append(False)
+        
+    ret.pre_proc_time = datetime.datetime.now() - exec_begin
+    exec_begin = datetime.datetime.now()
+
+    # Create the KV table for the class column.
+    # Encode class column for classification.
+    if not cls_is_cont:
+        plpy.execute("DROP TABLE IF EXISTS " + kv_cls_name)
+        curstmt = """
+            CREATE TABLE {kv_cls_name} AS
+            SELECT 0 as fid,
+                   {madlib_schema}.__to_char({cls_col_name}) AS fval,
+                   rank() OVER (ORDER BY {cls_col_name}) AS code
+            FROM
+            (
+                SELECT {cls_col_name} 
+                FROM {input_tbl_name} 
+                GROUP BY {cls_col_name}
+            ) t
+            m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (fval)')
+            """.format(
+                madlib_schema = madlib_schema,
+                kv_cls_name = kv_cls_name,
+                cls_col_name = cls_col_name,
+                input_tbl_name = input_tbl_name)
+        if verbosity > 0:
+            plpy.info(curstmt)
+        plpy.execute(curstmt)
+    ret.gen_kv_time = datetime.datetime.now() - exec_begin
+    exec_begin = datetime.datetime.now()
+
+    # breakup each record of the training table and keep the result
+    # into a new table.
+    __breakup_table(
+        madlib_schema,
+        input_tbl_name,
+        breakup_tbl_name,
+        kv_cls_name,
+        id_col_name,
+        cls_col_name,
+        cls_is_cont,
+        cls_col_enc_name,
+        attr_col_names,
+        is_conts,
+        h2hmv_routine_id,
+        verbosity)
+    ret.breakup_tbl_time = datetime.datetime.now() - exec_begin
+    exec_begin = datetime.datetime.now()
+    
+    # generate the KV table for both continuous features
+    # and discrete features.
+    __encode_columns(
+        madlib_schema,  
+        kv_attr_name,
+        breakup_tbl_name,
+        h2hmv_routine_id,
+        verbosity)
+    ret.gen_kv_time = ret.gen_kv_time + (datetime.datetime.now() - exec_begin)
+    exec_begin = datetime.datetime.now()
+
+    # generate the encoded table using the breakup table
+    # and KV table for all the features.
+    __gen_vertical_encoded_table(
+        madlib_schema,
+        breakup_tbl_name,
+        enc_table_name,
+        kv_attr_name,
+        False,
+        cls_is_cont,
+        cls_col_enc_name,
+        verbosity)
+    ret.gen_enc_time = datetime.datetime.now() - exec_begin
+    exec_begin = datetime.datetime.now()
+
+    # put the features' meta information to the metatable
+    curstmt = """
+        INSERT INTO {meta_tbl_name}
+        SELECT fid AS id, 
+               ({attr_col_names})[fid] AS column_name,
+               'f' AS column_type,
+               is_cont,
+               '{kv_attr_name}'::regclass::OID,
+               count(fid) as num_dist_value
+        FROM {tmp_dist_table} t
+        GROUP BY fid, is_cont
+        """.format(
+            meta_tbl_name = meta_tbl_name,
+            attr_col_names = util.__list_to_sql(attr_col_names),
+            kv_attr_name = kv_attr_name,
+            tmp_dist_table = "tmp_dist_table")
+    plpy.execute(curstmt)
+
+    # when all value of a column are null, and the h2hmv_routine_id is 
+    # 1(ignore), the column would not be added to the meta table, so we only 
+    # add these columns manually.
+    if h2hmv_routine_id == 1:
+        plpy.execute(
+            """
+            INSERT INTO {meta_tbl_name}
+            SELECT g.fid AS id,
+                   ({attr_col_names})[g.fid] AS column_name,
+                   'f' AS column_type,
+                   (({is_conts})[g.fid])::BOOL,
+                   '{kv_attr_name}'::regclass::OID,
+                   1 as num_dist_value
+            FROM
+            ( 
+                SELECT generate_series(1, {num_fid}) as fid
+            ) g
+            WHERE g.fid NOT IN
+            (
+                SELECT id FROM {meta_tbl_name}
+            ) 
+            """.format(
+                num_fid = len(is_conts),
+                attr_col_names = util.__list_to_sql(attr_col_names),
+                is_conts = ('ARRAY[' + '::BOOL,'.join(
+                    str(is_cont) for is_cont in is_conts) + ']'),
+                kv_attr_name = kv_attr_name,
+                meta_tbl_name = meta_tbl_name))
+
+    # no need this table
+    plpy.execute("DROP TABLE IF EXISTS tmp_dist_table")
+
+    # put the class's meta information to the metatable
+    # as we know, the classification tree need kv_class_tbl, and regression
+    # tree does not need, so we put the classification tree kv_cls_name into
+    # metatable
+    if cls_is_cont:
+        curstmt = """
+            INSERT INTO {meta_tbl_name}
+                (id, column_name, column_type, is_cont, table_oid, num_dist_value)
+            VALUES
+            (    
+                0,   
+                '{cls_col_name}',
+                'c', 
+                't'::BOOL,
+                NULL,
+                NULL 
+            )    
+            """.format(
+                meta_tbl_name = meta_tbl_name,
+                cls_col_name = cls_col_name)
+    else:
+        curstmt = """
+            INSERT INTO {meta_tbl_name}
+            SELECT 0 as id,
+                   '{cls_col_name}',
+                   'c' as column_type,
+                   'f'::BOOL,
+                   '{kv_cls_name}'::regclass::OID,
+                    count(code) as num_dist_value
+            FROM {kv_cls_name} t
+            GROUP BY fid
+            """.format(
+                meta_tbl_name = meta_tbl_name,
+                cls_col_name = cls_col_name,
+                kv_cls_name = kv_cls_name)
+    plpy.execute(curstmt)
+    
+    # put the id's meta information to the metatable
+    __insert_into_metatable(
+        madlib_schema,
+        meta_tbl_name,
+        len(attr_col_names) + 1,
+        id_col_name,
+        'i',
+        False,
+        None, 
+        0)
+
+    # analyze the table, so that later the optimizer has the statistics
+    # information about this table
+    plpy.execute("ANALYZE " + enc_table_name)
+
+    ret.post_proc_time = datetime.datetime.now() - exec_begin
+
+    if verbosity > 0:
+        encode_time = ("pre_proc_time:" + str(ret.pre_proc_time) + 
+            ", gen_kv_time:" + str(ret.gen_kv_time) + 
+            ", breakup_tbl_time:" + str(ret.breakup_tbl_time) + 
+            ", post_proc_time:" + str(ret.post_proc_time) +
+            ", gen_enc_time:" + str(ret.gen_enc_time) +
+            ",total_time:" + str(datetime.datetime.now() - begin_t))
+        plpy.info("time of encoding: " + encode_time) 
+ 
+
+def __encode_classification_table(
+        madlib_schema,
+        input_tbl_name,
+        enc_tbl_name,
+        meta_tbl_name,
+        h2hmv_routine_id,
+        cls_is_cont,
+        cls_col_enc_name,
+        verbosity):
+    """
+    @brief Encode a tabular table for classification/scoring.
+
+    @param input_table_name      The full name of the input table.
+    @param encoded_table_name    The full name of the encoded table.
+    @param metatable_name        The full name of the metatable.
+    @param h2hmv_routine_id      The ID of the routine which specifies
+                                 how to handle missing value(h2hmv).
+    @param verbosity             > 0 means this function runs in verbose mode.
+
+    @return The name of the encoded table.
+    """
+    exec_begin = datetime.datetime.now()
+    breakup_tbl_name = "tmp_breakup_table"
+
+    curstmt = """
+        SELECT column_name
+        FROM {metatable_name}
+        WHERE column_type = 'i'
+        """.format(metatable_name = meta_tbl_name)
+    id_column_name_t = plpy.execute(curstmt)
+    id_col_name = util.__get_query_value(id_column_name_t ,"column_name")
+
+    curstmt = """
+        SELECT column_name
+        FROM {metatable_name}
+        WHERE column_type = 'c';
+        """.format(metatable_name = meta_tbl_name)
+    t = plpy.execute(curstmt)
+    cls_col_name = util.__get_query_value(t, "column_name")
+
+    t = plpy.execute(
+        """
+        SELECT {madlib_schema}.__column_exists(
+            '{input_tbl_name}',
+            '{cls_col_name}'
+        ) AS ce
+        """.format(
+            madlib_schema = madlib_schema, 
+            input_tbl_name = input_tbl_name,
+            cls_col_name = cls_col_name))
+    column_existence = util.__get_query_value(t, "ce")
+
+    if not column_existence:
+        cls_col_name = None
+
+m4_changequote(`>>>', `<<<')
+m4_ifdef(`__HAS_ORDERED_AGGREGATES__', >>>
+    curstmt = """
+        SELECT array_agg(column_name order by id) AS agg
+        FROM {meta_tbl_name} 
+        WHERE column_type='f'
+        """.format(meta_tbl_name = meta_tbl_name)
+    t = plpy.execute(curstmt)
+    attr_col_names = util.__get_query_value(t, "agg")
+
+    curstmt = """
+        SELECT array_agg(is_cont order by id) as agg
+        FROM {meta_tbl_name}
+        WHERE column_type='f'
+        """.format(meta_tbl_name = meta_tbl_name)
+    t = plpy.execute(curstmt)
+    is_conts = util.__get_query_value(t, "agg")
+<<<,>>>
+    curstmt = """
+        SELECT ARRAY
+        (
+            SELECT column_name
+            FROM {meta_tbl_name} WHERE column_type = 'f'
+            ORDER BY id
+            LIMIT ALL
+        ) AS attr_col_names
+        """.format(meta_tbl_name = meta_tbl_name)
+    t = plpy.execute(curstmt)
+    attr_col_names = util.__get_query_value(t, "attr_col_names")
+
+    curstmt = """
+        SELECT ARRAY
+        (
+            SELECT is_cont
+            FROM {meta_tbl_name}
+            WHERE column_type = 'f'
+            ORDER BY id
+            LIMIT ALL
+        ) AS array_is_cont
+        """.format(meta_tbl_name = meta_tbl_name)
+    t = plpy.execute(curstmt)
+    is_conts = util.__get_query_value(t, "array_is_cont")
+<<<)
+m4_changequote(>>>`<<<, >>>'<<<)
+
+    curstmt = """
+        SELECT {madlib_schema}.__regclass_to_text(table_oid) AS table_name
+        FROM {meta_tbl_name}
+        WHERE column_type = 'f' limit 1
+        """.format(
+            meta_tbl_name = meta_tbl_name, 
+            madlib_schema = madlib_schema)
+    t = plpy.execute(curstmt)
+    kv_attr_name = util.__get_query_value(t, "table_name")
+
+    # encode class label for classification whose class label is discrete.
+    kv_cls_name = ''
+    if not cls_is_cont:
+        curstmt = """
+            SELECT {madlib_schema}.__regclass_to_text(table_oid) AS table_name
+            FROM {meta_tbl_name}
+            WHERE column_type = 'c' 
+            LIMIT 1
+            """.format(
+                meta_tbl_name = meta_tbl_name,
+                madlib_schema = madlib_schema)
+        t = plpy.execute(curstmt)
+        kv_cls_name = util.__get_query_value(t, "table_name")
+
+    __validate_input_table(
+        madlib_schema,
+        input_tbl_name,
+        None,
+        id_col_name,
+        None)
+
+    # breakup each record from the classification/scoring
+    # table and kept the results into a new table.
+    __breakup_table(
+        madlib_schema,
+        input_tbl_name,
+        breakup_tbl_name,
+        kv_cls_name,
+        id_col_name,
+        cls_col_name,
+        cls_is_cont,
+        cls_col_enc_name,
+        attr_col_names,
+        is_conts,
+        h2hmv_routine_id,
+        verbosity)
+
+    # generate the vertical encoded table.
+    ver_enc_tbl_name = 'tmp_ver_table'
+    __gen_vertical_encoded_table(
+        madlib_schema,
+        breakup_tbl_name,
+        ver_enc_tbl_name,
+        kv_attr_name,
+        True,
+        cls_is_cont,
+        cls_col_enc_name,
+        verbosity)
+
+    # generate the horizontal encoded table.
+    plpy.execute("DROP TABLE IF EXISTS " + enc_tbl_name)
+    __gen_horizontal_encoded_table(
+        madlib_schema,
+        enc_tbl_name,
+        ver_enc_tbl_name,
+        len(is_conts),
+        cls_is_cont,
+        cls_col_enc_name,
+        verbosity)
+
+    plpy.execute("DROP TABLE IF EXISTS dt_tmp_ver_table")
+    if verbosity > 0:
+        plpy.info(
+            "Encoding time:" + str(datetime.datetime.now() - exec_begin))
+
+
+def __size_of_table(
+        madlib_schema,
+        full_tbl_name):
+    """
+    @brief This function get the total size of a table of 'full_tbl_name'
+
+    @param madlib_schema    The name of the madlib schema.
+    @param full_tbl_name    The name of the table.
+    """
+    t = plpy.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM {full_tbl_name}
+        """.format(full_tbl_name = full_tbl_name))
+    return util.__get_query_value(t, 'count')

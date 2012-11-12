@@ -1,0 +1,97 @@
+DROP TABLE IF EXISTS MADLIB_SCHEMA.golf_rt_test;
+CREATE TABLE MADLIB_SCHEMA.golf_rt_test (
+    id          INT,
+    outlook     TEXT,
+    temperature DOUBLE PRECISION,
+    humidity    DOUBLE PRECISION,
+    windy       TEXT,
+    predict_val FLOAT8
+) m4_ifdef(`GREENPLUM',`DISTRIBUTED BY (id)');
+
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (1, 'sunny', 85, 85, ' false', '0.01');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (3, 'overcast', 83, 78, ' false', '0.97');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (5, 'rain', 68, 80, ' false', '0.95');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (7, 'overcast', 64, 65, ' true', '0.93');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (9, 'sunny', 69, 70, ' false', '0.91');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (11, 'sunny', 75, 70, ' true', '0.89');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (13, 'overcast', 81, 75, ' false', '0.87');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (2, 'sunny', 80, 90, ' true', '0.02');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (4, 'rain', 70, 96, ' false', '0.96');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (6, 'rain', 65, 70, ' true', '0.06');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (8, 'sunny', 72, 95, ' false', '0.08');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (10, 'rain', 75, 80, ' false', '0.90');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (12, 'overcast', 72, 90, ' true', '0.88');
+INSERT INTO MADLIB_SCHEMA.golf_rt_test VALUES (14, 'rain', 71, 80, ' true', '0.14');
+
+DROP FUNCTION IF EXISTS MADLIB_SCHEMA.rt_test(TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,FLOAT,TEXT,INT,FLOAT,FLOAT,TEXT,TEXT);
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.rt_test
+    (
+    rt_type                     TEXT,
+    training_table_name         TEXT,
+    result_tree_table_name      TEXT,
+    validation_table_name       TEXT,
+    continuous_feature_names    TEXT,
+    feature_col_names           TEXT,
+    id_col_name                 TEXT,
+    val_col_name                TEXT,
+    min_variance_gain           FLOAT,
+    how2handle_missing_value    TEXT,
+    max_tree_depth              INT,
+    min_percent_node            FLOAT,
+    min_percent_split           FLOAT,
+    scoring_table_name          TEXT,
+    display_result              TEXT
+    ) 
+RETURNS TEXT AS $$
+DECLARE
+    result              TEXT := 'PASS';
+    score_accuracy      FLOAT8;
+    train_result        MADLIB_SCHEMA.rt_train_result;
+    tree_name           TEXT := 'MADLIB_SCHEMA.trained_tree_rt';
+    pass                BOOL;
+    display             TEXT;
+BEGIN
+	train_result = MADLIB_SCHEMA.rt_train(
+        rt_type,
+        training_table_name,
+        result_tree_table_name,
+        validation_table_name,
+        continuous_feature_names,
+        feature_col_names,
+        id_col_name,
+        val_col_name,
+        min_variance_gain,
+        how2handle_missing_value,
+        max_tree_depth,
+        min_percent_node,
+        min_percent_split,
+        0);
+    -- ensure we didn't change the variable names of the returned type
+    EXECUTE 'SELECT COUNT(*) = 4 FROM pg_attribute
+             WHERE attrelid = ''MADLIB_SCHEMA.rt_train_result''::regclass and
+                   attname IN (''num_of_samples'', ''tree_nodes'',
+                               ''tree_depth'', ''training_time'')' 
+    INTO pass;
+    IF (NOT pass) THEN
+        result = 'FAIL';
+        RAISE EXCEPTION 'Install check failed.';
+    END IF;
+    
+	score_accuracy = MADLIB_SCHEMA.rt_score(result_tree_table_name, scoring_table_name, 0);
+    RAISE INFO 'Score:%',score_accuracy;
+    
+    display = MADLIB_SCHEMA.rt_display(result_tree_table_name);
+    RAISE INFO '%',display;
+
+    PERFORM MADLIB_SCHEMA.rt_clean(result_tree_table_name);
+
+    RETURN result;
+END
+$$ LANGUAGE PLPGSQL;	
+
+SELECT MADLIB_SCHEMA.rt_test('const_value','golf_rt_test','trained_tree_rt',NULL,'temperature,humidity',NULL,'id',
+    'predict_val',0.01,'ignore',10,0.001,0.01,'golf_rt_test','');
+SELECT MADLIB_SCHEMA.rt_test('const_value','golf_rt_test','trained_tree_rt','golf_rt_test','temperature,humidity',NULL,'id',
+    'predict_val',0.01,'ignore',10,0.001,0.01,'golf_rt_test','');
+SELECT MADLIB_SCHEMA.rt_test('const_value','golf_rt_test','trained_tree_rt','golf_rt_test','temperature,humidity','temperature,humidity,outlook,windy','id','predict_val',0.01,'ignore',10,0.001,0.01,'golf_rt_test','');
+
