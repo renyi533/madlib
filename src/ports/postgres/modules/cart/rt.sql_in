@@ -523,7 +523,9 @@ DROP AGGREGATE IF EXISTS MADLIB_SCHEMA.__display_tree_aggr_rt
     FLOAT8,     -- predict_val
     INT         -- num_of_samples
     ) CASCADE;
-CREATE ORDERED AGGREGATE MADLIB_SCHEMA.__display_tree_aggr_rt
+CREATE 
+m4_ifdef(`__GREENPLUM__', m4_ifdef(`__HAS_ORDERED_AGGREGATES__', `ORDERED'))
+AGGREGATE MADLIB_SCHEMA.__display_tree_aggr_rt
     (
     INT,        -- depth
     BOOLEAN,    -- is_cont

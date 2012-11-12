@@ -846,7 +846,10 @@ def display(madlib_schema, rt_tbl_name):
     # the tree.
     # If we order by tree_location, we can get the sequence of depth first
     # traversal.
-    t = plpy.execute(
+    disp_str = ''
+m4_changequote(`>>>', `<<<')
+m4_ifdef(>>>__HAS_ORDERED_AGGREGATES__<<<, >>>
+    disp_str = 
         """
         SELECT {madlib_schema}.__display_tree_aggr_rt
         (
@@ -860,7 +863,35 @@ def display(madlib_schema, rt_tbl_name):
             ORDER BY tree_location
         ) AS disp_str
         FROM {aux_tree_display_table}
-        """.format(
+        """
+<<<, >>>
+    disp_str = 
+        """
+        SELECT disp_str
+        FROM
+        (
+            SELECT 
+            row_number() OVER (ORDER BY tree_location desc) AS row,
+            {madlib_schema}.__display_tree_aggr_rt
+            (
+                array_upper(tree_location, 1) - 1,
+                parent_is_cont,
+                parent_feature_name,
+                curr_value,
+                parent_split_value,
+                predict_val,
+                num_of_samples
+            ) 
+            OVER (ORDER BY tree_location) AS disp_str
+            FROM {aux_tree_display_table}
+        ) l
+        WHERE l.row=1
+        """
+<<<)
+m4_changequote(>>>`<<<, >>>'<<<)
+
+    t = plpy.execute(
+        disp_str.format(
             madlib_schema = madlib_schema,
             aux_tree_display_table = aux_tree_display_table))
     
