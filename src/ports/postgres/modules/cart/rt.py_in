@@ -849,8 +849,7 @@ def display(madlib_schema, rt_tbl_name):
     disp_str = ''
 m4_changequote(`>>>', `<<<')
 m4_ifdef(>>>__HAS_ORDERED_AGGREGATES__<<<, >>>
-    disp_str = 
-        """
+    disp_str = """
         SELECT {madlib_schema}.__display_tree_aggr_rt
         (
             array_upper(tree_location, 1) - 1,
@@ -865,8 +864,7 @@ m4_ifdef(>>>__HAS_ORDERED_AGGREGATES__<<<, >>>
         FROM {aux_tree_display_table}
         """
 <<<, >>>
-    disp_str = 
-        """
+    disp_str = """
         SELECT disp_str
         FROM
         (
