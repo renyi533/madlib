@@ -88,8 +88,8 @@ def train(
     @param id_col_name            The name of column containing an ID. The 
                                   default value is "id".
     @param dependent_col_name     The name of column containing the feature to
-                                  be predicted. The default value is 
-                                  "predic_val".
+                                  be predicted, which depends on the other columns. 
+                                  The default value is "predic_val".
     @param min_variance_gain      Any split that does not decrease the overall
                                   variance by a factor of min_variance_gain is
                                   not attempted. The main role of this
