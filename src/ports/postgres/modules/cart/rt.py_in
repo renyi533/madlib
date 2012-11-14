@@ -40,7 +40,7 @@ def train(
         cont_feature_names,
         feature_col_names,
         id_col_name,
-        val_col_name,
+        dependent_col_name,
         min_variance_gain,
         how2hmv,
         max_tree_depth,
@@ -87,7 +87,7 @@ def train(
                                   and "predict_val".
     @param id_col_name            The name of column containing an ID. The 
                                   default value is "id".
-    @param val_col_name           The name of column containing the feature to
+    @param dependent_col_name     The name of column containing the feature to
                                   be predicted. The default value is 
                                   "predic_val".
     @param min_variance_gain      Any split that does not decrease the overall
@@ -188,7 +188,7 @@ def train(
         cont_feature_array,
         all_feature_array,
         id_col_name,
-        val_col_name)
+        dependent_col_name)
     if verbosity > 0:
         plpy.info(
             ("validate provided columns time:" + 
@@ -217,7 +217,7 @@ def train(
         training_tbl_name,
         id_col_name,
         all_feature_array,
-        str(val_col_name).lower(),
+        str(dependent_col_name).lower(),
         True,
         'predict_val',
         cont_feature_array,
@@ -258,7 +258,7 @@ def train(
         result_tree_tbl_name,
         validation_tbl_name,
         id_col_name,
-        val_col_name,
+        dependent_col_name,
         min_variance_gain,
         h2hmv_routine_name,
         max_tree_depth,
@@ -372,7 +372,7 @@ def __train_tree(
         result_tree_tbl_name,
         validation_tbl_name,
         id_col_name,
-        val_col_name,
+        dependent_col_name,
         min_variance_gain,
         h2hmv_routine_name,
         max_tree_depth,
@@ -393,7 +393,7 @@ def __train_tree(
                                     result of training tree.
     @param validation_tbl_name      The name of the validation table.
     @param id_col_name              The name of the id column.
-    @param val_col_name             The name of the predict value column.
+    @param dependent_col_name             The name of the predict value column.
     @param min_variance_gain        The minimum value of variance gain, if the
                                     gain is less than this value, we would
                                     stop growing the tree.
@@ -499,7 +499,7 @@ def __train_tree(
             cur_tr_table,
             avs_tbl_name,
             training_tbl_name,
-            val_col_name,
+            dependent_col_name,
             node_info_tbl_name,
             tmp_hori_tbl_name,
             verbosity)
@@ -687,7 +687,7 @@ def __train_tree(
             madlib_schema,
             result_tree_tbl_name, 
             validation_tbl_name,
-            val_col_name,
+            dependent_col_name,
             verbosity)
         if verbosity > 0:
             plpy.info(
@@ -1222,7 +1222,7 @@ def __prune_tree(
         madlib_schema,
         result_tree_tbl_name,
         validation_tbl_name,
-        val_col_name,
+        dependent_col_name,
         verbosity):
     """
     @brief  This function prunes the trained regression tree, and reduce the 
@@ -1233,7 +1233,7 @@ def __prune_tree(
     @param  result_tree_tbl_name    The name of the trained regression tree.
     @param  validation_tbl_name     Specify the table which is used to prune
                                     the trained regression tree.
-    @param  val_col_name            The predict value column.
+    @param  dependent_col_name      The predict value column.
     @param  verbosity               > 0 means that algorithm run in verbose
                                     mode.
     """
@@ -1243,9 +1243,9 @@ def __prune_tree(
 
     # Check the validation table.
     util.__assert(
-        val_col_name is not None and
+        dependent_col_name is not None and
         validation_tbl_name is not None,
-        "The val_col_name and validation_tbl_name should not be NULL")
+        "The dependent_col_name and validation_tbl_name should not be NULL")
     util.__assert(
         result_tree_tbl_name is not None and
         util.__table_exists(madlib_schema, result_tree_tbl_name),
@@ -1275,13 +1275,13 @@ def __prune_tree(
         CREATE TEMP TABLE {rt_prune_aux} AS
         SELECT p.id, p.leaf_id, p.parent_id, 
                p.predict_val AS leaf_val,
-               t.{val_col_name} AS real_val
+               t.{dependent_col_name} AS real_val
         FROM {predict_result} p, {validation_tbl_name} t
         WHERE p.id = t.id
         """.format(
             rt_prune_aux = rt_prune_aux,
             predict_result = predict_result,
-            val_col_name = val_col_name,
+            dependent_col_name = dependent_col_name,
             validation_tbl_name = validation_tbl_name))
     if verbosity > 0:
         plpy.info(
@@ -1518,7 +1518,7 @@ def __gen_avs(
         cur_tr_table,
         avs_tbl_name,
         training_tbl_name,
-        val_col_name,
+        dependent_col_name,
         node_info_tbl_name,
         tmp_hori_tbl_name,
         verbosity):
@@ -1537,7 +1537,7 @@ def __gen_avs(
                                     caculating the variance_gain.
     @param  training_tbl_name       The name of the table used to train a 
                                     regression tree.
-    @param  val_col_name            The label value to predict in the training
+    @param  dependent_col_name      The label value to predict in the training
                                     table.
     @param  node_info_tbl_name      The table including the statistics 
                                     information.
@@ -1826,7 +1826,7 @@ def __validate_provided_columns(
         cont_feature_array,
         all_feature_array,
         id_col_name,
-        val_col_name):
+        dependent_col_name):
     """
     @brief Validate if the provided columns are int the training table or not.
 
@@ -1838,7 +1838,7 @@ def __validate_provided_columns(
     @param all_feature_array    A string array that contains all feature name.
     @param id_col_name          The name of the column containing an ID for
                                 each record.
-    @param val_col_name         The name of the column containing the labeled
+    @param dependent_col_name   The name of the column containing the labeled
                                 value for regression.
     """
     # validate whether id_col_name is in the training table.
@@ -1855,9 +1855,9 @@ def __validate_provided_columns(
         util.__column_exists(
             madlib_schema,
             training_tbl_name,
-            val_col_name.strip().lower()),
+            dependent_col_name.strip().lower()),
         ('the specified training table <' + training_tbl_name +
-            '> does not have column ' + str(val_col_name)))
+            '> does not have column ' + str(dependent_col_name)))
     if all_feature_array is None:       
         util.__assert(
             util.__columns_in_table(
@@ -1954,7 +1954,7 @@ def score(
     # Initial params.
     enc_tbl_name = 'rt_predict_internal_edt'
     result_tbl_name = 'tmp_rt_predict_result'
-    val_col_name = 'predict_val'
+    dependent_col_name = 'predict_val'
 
     # Check the params.
     util.__assert(
@@ -1995,7 +1995,7 @@ def score(
             (
                 pow
                 (
-                    p.{val_col_name} - s.{val_col_name}, 2    
+                    p.{dependent_col_name} - s.{dependent_col_name}, 2    
                 )
             )
             /
@@ -2003,7 +2003,7 @@ def score(
             (
                 pow
                 (
-                    l.avg - s.{val_col_name}, 2
+                    l.avg - s.{dependent_col_name}, 2
                 )
             )
         ) AS rrse
@@ -2011,12 +2011,12 @@ def score(
         {enc_tbl_name} s,
         {result_tbl_name} p,
         (
-            SELECT avg({val_col_name}) AS avg
+            SELECT avg({dependent_col_name}) AS avg
             FROM {enc_tbl_name}
         ) l
         WHERE s.id = p.id
         """.format(
-            val_col_name = val_col_name,
+            dependent_col_name = dependent_col_name,
             enc_tbl_name = enc_tbl_name,
             result_tbl_name = result_tbl_name))
 

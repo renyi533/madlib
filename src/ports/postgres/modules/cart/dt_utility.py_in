@@ -27,6 +27,29 @@ def __get_query_value(t, key, i = 0):
         return None
 
 
+def __get_query_array(t, key, i = 0):
+    """
+    @brief Get the specified array from the query.
+
+    @param t     The result getting from plpy.execute(sql), which
+                 is a list of dicts.
+    @param key   The keyword in the ith dict.
+    @param i     The index of ith record in t, default value is 0.
+
+    @return      The array of the keyword in the ith record.
+    """
+    if t is not None and t.nrows() > 0:
+        result = t[i][key]
+        if type(result) is not list:
+            if (result.startswith('{') and  
+                result.endswith('}')):
+                result = result[1:len(result) - 1] 
+            result = result.split(',')
+        return result
+    else:
+        return None
+
+
 def __get_query_record(t, i = 0):
     """
     @brief Get the ith record from t.

@@ -635,15 +635,13 @@ m4_changequote(>>>`<<<, >>>'<<<)
     if h2hmv_routine_id == 1:
         where_txt = """ 
             WHERE NULLIF(NULLIF(btrim(fval, ' '), '?'), '') 
-            IS NOT NULL
-            """ 
+            IS NOT NULL""" 
     else:
         fval_txt = """
             CASE WHEN NULLIF(NULLIF(btrim(fval, ' '), '?'), '') IS NULL 
                  THEN NULL
                  ELSE fval
-            END
-            """ 
+            END""" 
 
     if cls_col_name is None:
         # if the kv_cls_name is null, then the class column will be null
@@ -696,8 +694,7 @@ m4_changequote(>>>`<<<, >>>'<<<)
             where_sql = """
                 WHERE {madlib_schema}.__to_char(
                     t1.{cls_col_name}
-                ) = t2.fval
-                """.format(
+                ) = t2.fval""".format(
                     madlib_schema = madlib_schema,
                     cls_col_name = cls_col_name)
             from_sql = "{input_tbl_name} t1, {kv_cls_name} t2".format(
@@ -739,9 +736,9 @@ m4_changequote(>>>`<<<, >>>'<<<)
                 attr_col_names = "), {madlib_schema}.__to_char(".format(
                     madlib_schema = madlib_schema).join(
                         name for name in attr_col_names),
-                    is_conts = ",".join(
-                        ("'" + str(is_cont) + "'::BOOL") 
-                        for is_cont in is_conts),
+                is_conts = ",".join(
+                    ("'" + str(is_cont) + "'::BOOL") 
+                    for is_cont in is_conts),
                 class_sql = class_sql,
                 from_sql = from_sql,
                 where_sql = where_sql,
@@ -1072,7 +1069,8 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', >>>
                 id_col_name = id_col_name,
                 cls_col_name = cls_col_name)  
         t = plpy.execute(curstmt)
-        attr_col_names = util.__get_query_value(t, "attnames")
+        attr_col_names = util.__get_query_array(t, "attnames")
+        
 <<<, >>>
         curstmt = """
             SELECT ARRAY
@@ -1092,12 +1090,12 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', >>>
                 id_col_name = id_col_name,
                 cls_col_name = cls_col_name)
         t = plpy.execute(curstmt)
-        attr_col_names = util.__get_query_value(t, "arr_attname")
+        attr_col_names = util.__get_query_array(t, "arr_attname")
 <<<)
 m4_changequote(>>>`<<<, >>>'<<<) 
     else:
         attr_col_names = sorted(feature_names)
-    
+
     # an array contains if a feature is continuous or not
     # the subscript is corresponding to the feature's ID
     if cont_attr_names is not None:
@@ -1360,7 +1358,7 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', >>>
         WHERE column_type='f'
         """.format(meta_tbl_name = meta_tbl_name)
     t = plpy.execute(curstmt)
-    attr_col_names = util.__get_query_value(t, "agg")
+    attr_col_names = util.__get_query_array(t, "agg")
 
     curstmt = """
         SELECT array_agg(is_cont order by id) as agg
@@ -1368,7 +1366,7 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', >>>
         WHERE column_type='f'
         """.format(meta_tbl_name = meta_tbl_name)
     t = plpy.execute(curstmt)
-    is_conts = util.__get_query_value(t, "agg")
+    is_conts = util.__get_query_array(t, "agg")
 <<<,>>>
     curstmt = """
         SELECT ARRAY
@@ -1380,7 +1378,7 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', >>>
         ) AS attr_col_names
         """.format(meta_tbl_name = meta_tbl_name)
     t = plpy.execute(curstmt)
-    attr_col_names = util.__get_query_value(t, "attr_col_names")
+    attr_col_names = util.__get_query_array(t, "attr_col_names")
 
     curstmt = """
         SELECT ARRAY
@@ -1393,7 +1391,7 @@ m4_ifdef(`__HAS_ORDERED_AGGREGATES__', >>>
         ) AS array_is_cont
         """.format(meta_tbl_name = meta_tbl_name)
     t = plpy.execute(curstmt)
-    is_conts = util.__get_query_value(t, "array_is_cont")
+    is_conts = util.__get_query_array(t, "array_is_cont")
 <<<)
 m4_changequote(>>>`<<<, >>>'<<<)
 
