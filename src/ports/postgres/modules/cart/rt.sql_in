@@ -92,7 +92,7 @@ that it does not need a predict_val column.
     '<em>continuous_feature_names</em>',
     '<em>feature_col_names</em>',
     '<em>id_col_name</em>', 
-    '<em>val_col_name</em>',
+    '<em>dependent_col_name</em>',
     '<em>min_variance_gain</em>',
     '<em>how2handle_missing_value</em>'
     '<em>max_tree_depth</em>',
@@ -373,7 +373,7 @@ CREATE TYPE MADLIB_SCHEMA.rt_train_result AS
  *                                      and "predict_val".
  * @param id_col_name                   The name of column containing an ID. The
  *                                      default value is "id".
- * @param val_col_name                  The name of column containing the feature to
+ * @param dependent_col_name            The name of column containing the feature to
  *                                      be predicted. The default value is
  *                                      "predic_val".
  * @param min_variance_gain             Any split that does not decrease the overall
@@ -410,7 +410,7 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.rt_train
     continuous_feature_names    TEXT,
     feature_col_names           TEXT,
     id_col_name                 TEXT,
-    val_col_name                TEXT,
+    dependent_col_name          TEXT,
     min_variance_gain           FLOAT,
     how2handle_missing_value    TEXT,
     max_tree_depth              INT,
@@ -422,7 +422,7 @@ RETURNS MADLIB_SCHEMA.rt_train_result AS $$
     PythonFunctionBodyOnly(`cart', `rt')             
     return rt.train(schema_madlib, rt_type, training_table_name, result_tree_table_name, 
         validation_table_name, continuous_feature_names, feature_col_names, id_col_name,
-        val_col_name, min_variance_gain, how2handle_missing_value, max_tree_depth, 
+        dependent_col_name, min_variance_gain, how2handle_missing_value, max_tree_depth, 
         node_prune_threshold, node_split_threshold, verbosity)
 $$ LANGUAGE PLPYTHONU;
 
