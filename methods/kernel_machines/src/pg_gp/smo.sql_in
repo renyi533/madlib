@@ -1,0 +1,27 @@
+m4_include(`SQLCommon.m4')
+
+CREATE OR REPLACE FUNCTION 
+MADLIB_SCHEMA.smo_train(input_table text, id_col text, feature_col text, dependent_col text, model_table text,  kernel_func text,
+                        c float8, threshold float8, degree float8, gamma float8, max_iter int, verbosity int)
+RETURNS VOID
+AS $$
+    PythonFunctionBodyOnly(`kernel_machines', `smo')
+    
+    # schema_madlib comes from PythonFunctionBodyOnly
+    smo.train(schema_madlib, input_table, id_col, feature_col, dependent_col, model_table,  kernel_func,
+              c, threshold, degree, gamma, max_iter, verbosity);
+    
+$$ LANGUAGE 'plpythonu';
+
+CREATE OR REPLACE FUNCTION
+MADLIB_SCHEMA.smo_classify(input_table text, feature_col text, id_col text, model_table text, output_table text, kernel_func text,
+                            degree float8, gamma float8)
+RETURNS VOID
+AS $$
+
+    PythonFunctionBodyOnly(`kernel_machines', `smo')
+    
+    # schema_madlib comes from PythonFunctionBodyOnly
+    smo.classify(schema_madlib, input_table, feature_col, id_col, model_table, output_table, kernel_func, degree, gamma);
+    
+$$ LANGUAGE 'plpythonu';

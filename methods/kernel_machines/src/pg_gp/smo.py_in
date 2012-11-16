@@ -1,0 +1,228 @@
+#!/usr/bin/env python
+
+import plpy
+
+def __validate_input_table(input_table, id_col, feature_col, dependent_col) :
+    """
+    Assert the name of the input table should not be None, and
+    the dimension of the column "ind" should be less than or equal to 102, 400.
+
+    @param input_table Name of table/view containing the training data
+    """
+    rv = plpy.execute("""
+                        SELECT array_upper({0}, 1) as dim, {1}, {2} 
+                        FROM {3} LIMIT 1
+                      """.format(feature_col,id_col,dependent_col,input_table));
+    if rv.nrows() == 0 :
+        plpy.error("the training table is empty");
+
+    if rv is not None and rv[0]["dim"] > 102400:
+        plpy.error("the maximum number of features is 102400");
+
+def __get_kernel_func(schema_madlib, func_name, degree, gamma):
+    if func_name=='polynomial':
+        return schema_madlib+'.svm_polynomial({x1},{x2},'+str(degree)+')'
+    elif func_name=='linear':
+        return schema_madlib+'.svm_dot({x1},{x2})'
+    elif func_name=='gaussian':
+        return schema_madlib+'.svm_gaussian({x1},{x2},'+str(gamma)+')'
+    else:
+        plpy.error("Invalid kernel function specified")
+
+
+# -----------------------------------------------
+# Function to run the classification algorithm
+# -----------------------------------------------
+def train(schema_madlib, input_table , id_col , feature_col , dependent_col , model_table ,  kernel_func, C, threshold, degree, gamma, max_iter, verbosity):
+    """
+    Executes the support vector classification algorithm.
+
+    @param input_table Name of table/view containing the training data
+    @param model_table Name under which we want to store the learned model
+    @param parallel A flag indicating whether the system should learn multiple models in parallel
+    @param kernel_func Kernel function
+    @param verbose Verbosity of reporting
+    @param eta Learning rate in (0,1] (default value is 0.1)
+    @param nu Compression parameter in (0,1] associated with the fraction of training data that will become support vectors (default value is 0.005)
+
+    """
+
+    # Output error if model_table already exist
+    # if __check_rel_exist(model_table):
+    #    plpy.error('Table ' + model_table + ' exists; please use a different model table or drop ' + model_table + ' before calling this function.');
+    # plpy.execute('drop table if exists ' + model_table);
+
+    __validate_input_table(input_table, id_col, feature_col, dependent_col);
+
+    k_func = __get_kernel_func(schema_madlib, kernel_func, degree, gamma)
+
+    plpy.execute('DROP TABLE IF EXISTS smo_train_temp')
+    plpy.execute("""
+                    CREATE TEMP TABLE smo_train_temp AS 
+                    SELECT {id_col} id, {feature_col} feature, {dependent_col} dependent_val, 
+                           0.0::float8 AS alpha, -{dependent_col} AS f
+                    FROM {src_table}
+                 """.format(id_col = id_col, feature_col = feature_col, 
+                            dependent_col = dependent_col, src_table=input_table)
+                 )
+
+    while max_iter>0:
+        plpy.execute("DROP TABLE IF EXISTS smo_train_iteration")
+        plpy.execute("""
+            CREATE TEMP TABLE smo_train_iteration AS
+                SELECT max_res[1] b_low, max_res[2] alpha_low, 
+                       max_res[3] i_low, max_res[4] y_low, 
+                       (max_res)[5:array_upper(max_res,1)] x_low,
+                       min_res[1] b_up, min_res[2] alpha_up, 
+                       min_res[3] i_up, min_res[4] y_up, 
+                       (min_res)[5:array_upper(min_res,1)] x_up,
+                       0.0::float8 alpha_low_new, 0.0::float8 alpha_up_new
+                FROM
+                (
+                SELECT max(array_cat(
+                            array[ CASE WHEN ((alpha>0 AND alpha<{C}) OR 
+                                              (alpha={C} AND dependent_val>0) OR
+                                              (alpha=0 AND dependent_val<0)) THEN
+                                        f
+                                   ELSE
+                                        -'infinity'::float8
+                                   END, alpha, id, dependent_val ], feature )
+                            ) as max_res,
+                        min(array_cat(
+                            array[ CASE WHEN ((alpha>0 AND alpha<{C}) OR 
+                                              (alpha={C} AND dependent_val<0) OR
+                                              (alpha=0 AND dependent_val>0)) THEN
+                                        f
+                                   ELSE
+                                        'infinity'::float8
+                                   END, alpha, id, dependent_val ], feature )
+                            ) as min_res
+                FROM smo_train_temp
+                ) l
+                """.format( C = C ) )
+
+        rv = plpy.execute('SELECT *,'+k_func.format(x1='x_low', x2='x_low')\
+                          +'+'+k_func.format(x1='x_up', x2='x_up')+'-2*'\
+                          +k_func.format(x1='x_low', x2='x_up') +""" AS deri 
+                           FROM smo_train_iteration
+                          """)
+
+        y_low = rv[0]['y_low']
+        y_up = rv[0]['y_up']
+        b_low = rv[0]['b_low']
+        b_up = rv[0]['b_up']
+        alpha_low = rv[0]['alpha_low']
+        alpha_up = rv[0]['alpha_up']
+        i_low = rv[0]['i_low']
+        i_up  = rv[0]['i_up']
+        deri = rv[0]['deri']
+        if verbosity>0:
+            plpy.info('after get alpha from table. deri:{0},alpha_low:{1},alpha_up:{2},i_low:{3},i_up:{4} '.format(deri, alpha_low, alpha_up,i_low,i_up));
+
+        if (b_low-b_up<threshold):
+            break
+        elif verbosity>0:
+            plpy.info('b_low-b_up: {0}, threshold:{1}, b_low:{2}, b_up:{3}'.format(b_low-b_up, threshold, b_low, b_up))
+            
+        if (y_low != y_up):
+            L_low = max(0, alpha_low-alpha_up)
+            H_low = min(C, C+alpha_low-alpha_up)
+        else:
+            L_low = max(0, alpha_low+alpha_up-C)
+            H_low = min(C, alpha_low+alpha_up)
+        
+        if (deri>0):
+            alpha_low_new = alpha_low+y_low*(b_up-b_low)/deri
+        elif (y_low*(b_up-b_low)>0):
+            alpha_low_new = H_low
+        else:
+            alpha_low_new = L_low
+
+        if verbosity>0:
+            plpy.info('before clip, alpha_low_new: {0}'.format(alpha_low_new))
+
+        if (alpha_low_new>H_low):
+            alpha_low_new = H_low
+        elif (alpha_low_new<L_low):
+            alpha_low_new = L_low
+
+        if verbosity>0:
+            plpy.info('after clip, alpha_low_new: {0}, H_low:{1}, L_low:{2}'.format(alpha_low_new, H_low, L_low))
+
+        alpha_up_new = alpha_up+y_low*y_up*(alpha_low-alpha_low_new)
+            
+        plpy.execute("""
+                     UPDATE smo_train_iteration
+                     SET alpha_low_new={alpha_low_new},
+                         alpha_up_new={alpha_up_new}
+                      """.format(alpha_low_new=str(alpha_low_new),
+                                 alpha_up_new=str(alpha_up_new))
+                      )
+        
+        plpy.execute("""
+                     UPDATE smo_train_temp t
+                     SET alpha=
+                            CASE WHEN(t.id=l.i_low) THEN
+                                alpha_low_new
+                            ELSE
+                                CASE WHEN(t.id=l.i_up) THEN
+                                    alpha_up_new
+                                ELSE
+                                    alpha
+                                END
+                            END,
+                         f= f+(alpha_low_new-alpha_low)*y_low*"""+k_func.format(x1='x_low',x2='feature')+"""
+                            +(alpha_up_new-alpha_up)*y_up*"""+k_func.format(x1='x_up',x2='feature') +"""
+                     FROM smo_train_iteration l 
+                      """.format(alpha_low_new=str(alpha_low_new),
+                                 alpha_up_new=str(alpha_up_new))
+                      )
+
+        max_iter = max_iter-1
+
+    plpy.execute('drop table if exists ' + model_table);
+    plpy.execute("""
+                CREATE TABLE {model} AS
+                    SELECT feature x, dependent_val y, alpha, 
+                           CASE WHEN(alpha>0 AND alpha<{C}) THEN
+                                f 
+                           ELSE
+                                null
+                           END AS b
+                    FROM smo_train_temp
+                    WHERE alpha>0
+                """.format(model=model_table, C=str(C)))
+
+
+# ---------------------------------------------------
+# Function to predict the labels of points in a table
+# ---------------------------------------------------
+def classify(schema_madlib, input_table, data_col, id_col, model_table, output_table, kernel_func, degree, gamma):
+    """
+    Scores the data points stored in a table using a learned support vector model.
+
+    @param input_table Name of table/view containing the data points to be scored
+    @param data_col Name of column in input_table containing the data points
+    @param id_col Name of column in input_table containing (integer) identifier for data point
+    @param model_table Name of learned model
+    @param output_table Name of table to store the results
+    @param parallel A flag indicating whether the system should learn multiple models in parallel
+
+    """
+
+    k_func = __get_kernel_func(schema_madlib, kernel_func, degree, gamma)
+
+    plpy.execute('drop table if exists ' + output_table);
+    plpy.execute('create table ' + output_table + ' ( id int, prediction float8 ) m4_ifdef(`__GREENPLUM__', `distributed by (id)')');
+
+    plpy.execute(("""
+                INSERT INTO {0}
+                    SELECT {1},
+                           sum(m.alpha*m.y*"""+k_func.format(x1='m.x',x2=data_col)+""")
+                           -avg(m.b)
+                    FROM {2} m CROSS JOIN {3} t
+                    GROUP BY {4}
+                """).format(output_table, id_col, 
+                           model_table, input_table, id_col)
+                )
+
