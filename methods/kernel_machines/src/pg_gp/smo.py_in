@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import plpy
+import math
 
 def __validate_input_table(input_table, id_col, feature_col, dependent_col) :
     """
@@ -65,7 +66,8 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                  """.format(id_col = id_col, feature_col = feature_col, 
                             dependent_col = dependent_col, src_table=input_table)
                  )
-
+    
+    dual = 0.0
     while max_iter>0:
         plpy.execute("DROP TABLE IF EXISTS smo_train_iteration")
         plpy.execute("""
@@ -131,6 +133,11 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
             L_low = max(0, alpha_low+alpha_up-C)
             H_low = min(C, alpha_low+alpha_up)
         
+        if L_low>=H_low:
+            plpy.warning('invalid number. L_low: {0}, H_low:{1}'.format(L_low, H_low))
+            break
+
+
         if (deri>0):
             alpha_low_new = alpha_low+y_low*(b_up-b_low)/deri
         elif (y_low*(b_up-b_low)>0):
@@ -148,9 +155,14 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
 
         if verbosity>0:
             plpy.info('after clip, alpha_low_new: {0}, H_low:{1}, L_low:{2}'.format(alpha_low_new, H_low, L_low))
+        
+        if abs(alpha_low_new-alpha_low)<threshold*(alpha_low_new+alpha_low+threshold):
+            plpy.warning('too small alpha change. alpha_low_new: {0}, alpha_low:{1}'.format(alpha_low_new, alpha_low))
+            break
 
         alpha_up_new = alpha_up+y_low*y_up*(alpha_low-alpha_low_new)
             
+        dual = dual - (alpha_up_new-alpha_up)*(b_up-b_low)/y_up-deri*pow((alpha_up_new-alpha_up)/y_up, 2)/2
         plpy.execute("""
                      UPDATE smo_train_iteration
                      SET alpha_low_new={alpha_low_new},
@@ -177,6 +189,34 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                       """.format(alpha_low_new=str(alpha_low_new),
                                  alpha_up_new=str(alpha_up_new))
                       )
+        
+        rv =  plpy.execute("""
+                            SELECT avg(f) b
+                            FROM smo_train_temp
+                            WHERE alpha>0 and alpha<{C}
+                            """.format(C = str(C)))
+
+        b = rv[0]['b']
+        
+        rv = plpy.execute("""
+                          SELECT sum(
+                                    CASE WHEN(dependent_val>0) THEN
+                                        alpha*dependent_val*f+{C}*{schema_madlib}.array_max(array[0, {b}-f])
+                                    ELSE
+                                        alpha*dependent_val*f+{C}*{schema_madlib}.array_max(array[0, -({b})+f])
+                                    END
+                                    ) AS gap
+                          FROM
+                          smo_train_temp
+                          """.format( C =str(C), schema_madlib=schema_madlib, b=str(b) )
+                          )
+        duality_gap = rv[0]['gap']
+
+        if duality_gap<threshold*dual:
+            break
+        elif verbosity>0:
+            plpy.info('duality_gap: {0}, threshold:{1}, dual:{2}, ratio:{3}'.format(duality_gap, threshold, dual, duality_gap/dual))
+
 
         max_iter = max_iter-1
 
