@@ -2,6 +2,7 @@
 
 import plpy
 import math
+from time import clock, time
 
 def __validate_input_table(input_table, id_col, feature_col, dependent_col) :
     """
@@ -66,43 +67,81 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                  """.format(id_col = id_col, feature_col = feature_col, 
                             dependent_col = dependent_col, src_table=input_table)
                  )
-    
+    plpy.execute("DROP TABLE IF EXISTS smo_train_iteration")
+    plpy.execute("""
+        CREATE TEMP TABLE smo_train_iteration AS
+            SELECT 0::float8 b_low, 0::float8 alpha_low, 
+                   0::int i_low, 0::float8 y_low, 
+                   null::float8[] x_low,
+                   0::float8 b_up, 0::float8 alpha_up, 
+                   0::int i_up, 0::float8 y_up, 
+                   null::float8[] x_up,
+                   0.0::float8 alpha_low_new, 0.0::float8 alpha_up_new
+            DISTRIBUTED randomly
+                   """)
     dual = 0.0
-    while max_iter>0:
-        plpy.execute("DROP TABLE IF EXISTS smo_train_iteration")
+    iter = 0
+    while iter<max_iter:
+        iter = iter+1
+        start = time()
+        plpy.execute("DROP TABLE IF EXISTS b_temp_table")
         plpy.execute("""
-            CREATE TEMP TABLE smo_train_iteration AS
-                SELECT max_res[1] b_low, max_res[2] alpha_low, 
-                       max_res[3] i_low, max_res[4] y_low, 
-                       (max_res)[5:array_upper(max_res,1)] x_low,
-                       min_res[1] b_up, min_res[2] alpha_up, 
-                       min_res[3] i_up, min_res[4] y_up, 
-                       (min_res)[5:array_upper(min_res,1)] x_up,
-                       0.0::float8 alpha_low_new, 0.0::float8 alpha_up_new
-                FROM
-                (
-                SELECT max(array_cat(
-                            array[ CASE WHEN ((alpha>0 AND alpha<{C}) OR 
+            CREATE TEMP TABLE b_temp_table
+                AS
+                SELECT max( CASE WHEN ((alpha>0 AND alpha<{C}) OR 
                                               (alpha={C} AND dependent_val>0) OR
                                               (alpha=0 AND dependent_val<0)) THEN
                                         f
                                    ELSE
                                         -'infinity'::float8
-                                   END, alpha, id, dependent_val ], feature )
-                            ) as max_res,
-                        min(array_cat(
-                            array[ CASE WHEN ((alpha>0 AND alpha<{C}) OR 
+                                   END
+                            ) as b_low,
+                        min( CASE WHEN ((alpha>0 AND alpha<{C}) OR 
                                               (alpha={C} AND dependent_val<0) OR
                                               (alpha=0 AND dependent_val>0)) THEN
                                         f
                                    ELSE
                                         'infinity'::float8
-                                   END, alpha, id, dependent_val ], feature )
-                            ) as min_res
+                                   END
+                            ) as b_up
                 FROM smo_train_temp
-                ) l
                 """.format( C = C ) )
+        if verbosity>0:
+            plpy.info('Find alpha time in iteration {0}: {1}'.format(iter, time()-start))
 
+        start = time()
+        plpy.execute("""
+                    UPDATE smo_train_iteration
+                    SET 
+                    b_low = f, alpha_low = alpha, i_low = id, 
+                    y_low = dependent_val, x_low = feature
+                    FROM
+                    (
+                        SELECT t.f, t.alpha, t.id, t.dependent_val, t.feature
+                        FROM smo_train_temp t, b_temp_table b
+                        WHERE t.f = b.b_low
+                        LIMIT 1
+                    ) l
+                    """)
+
+        plpy.execute("""
+                    UPDATE smo_train_iteration
+                    SET 
+                    b_up = f, alpha_up = alpha, i_up = id, 
+                    y_up = dependent_val, x_up = feature
+                    FROM
+                    (
+                        SELECT t.f, t.alpha, t.id, t.dependent_val, t.feature
+                        FROM smo_train_temp t, b_temp_table b
+                        WHERE t.f = b.b_up
+                        LIMIT 1
+                    ) l
+                    """)
+
+        if verbosity>0:
+            plpy.info('Store alpha time in iteration {0}: {1}'.format(iter, time()-start))
+
+        start = time()
         rv = plpy.execute('SELECT *,'+k_func.format(x1='x_low', x2='x_low')\
                           +'+'+k_func.format(x1='x_up', x2='x_up')+'-2*'\
                           +k_func.format(x1='x_low', x2='x_up') +""" AS deri 
@@ -161,7 +200,11 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
             break
 
         alpha_up_new = alpha_up+y_low*y_up*(alpha_low-alpha_low_new)
+
+        if verbosity>0:
+            plpy.info('Compute new alpha time in iteration {0}: {1}'.format(iter, time()-start))
             
+        start = time()
         dual = dual - (alpha_up_new-alpha_up)*(b_up-b_low)/y_up-deri*pow((alpha_up_new-alpha_up)/y_up, 2)/2
         plpy.execute("""
                      UPDATE smo_train_iteration
@@ -171,25 +214,38 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                                  alpha_up_new=str(alpha_up_new))
                       )
         
+        #plpy.execute('ANALYZE smo_train_temp')
+        #plpy.execute('ANALYZE smo_train_iteration')
+
         plpy.execute("""
-                     UPDATE smo_train_temp t
-                     SET alpha=
-                            CASE WHEN(t.id=l.i_low) THEN
-                                alpha_low_new
-                            ELSE
-                                CASE WHEN(t.id=l.i_up) THEN
-                                    alpha_up_new
+                     CREATE TEMP TABLE smo_train_temp2 AS
+                        SELECT id, feature, dependent_val,
+                                CASE WHEN(t.id=l.i_low) THEN
+                                    alpha_low_new
                                 ELSE
-                                    alpha
-                                END
-                            END,
-                         f= f+(alpha_low_new-alpha_low)*y_low*"""+k_func.format(x1='x_low',x2='feature')+"""
-                            +(alpha_up_new-alpha_up)*y_up*"""+k_func.format(x1='x_up',x2='feature') +"""
-                     FROM smo_train_iteration l 
+                                    CASE WHEN(t.id=l.i_up) THEN
+                                        alpha_up_new
+                                    ELSE
+                                        alpha
+                                    END
+                                END AS alpha, 
+                                f+(alpha_low_new-alpha_low)*y_low*"""+k_func.format(x1='x_low',x2='feature')+"""
+                                +(alpha_up_new-alpha_up)*y_up*"""+k_func.format(x1='x_up',x2='feature') +""" AS f
+                        FROM
+                        smo_train_iteration l CROSS JOIN smo_train_temp t
                       """.format(alpha_low_new=str(alpha_low_new),
                                  alpha_up_new=str(alpha_up_new))
                       )
-        
+
+        plpy.execute("""DROP TABLE IF EXISTS smo_train_temp""")
+
+        plpy.execute("""ALTER TABLE smo_train_temp2 RENAME to smo_train_temp""")
+
+        if verbosity>0:
+            plpy.info('Update f time in iteration {0}: {1}'.format(iter, time()-start))
+
+        start = time()
+
         rv =  plpy.execute("""
                             SELECT avg(f) b
                             FROM smo_train_temp
@@ -197,6 +253,9 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                             """.format(C = str(C)))
 
         b = rv[0]['b']
+        
+        if b is None:
+            continue
         
         rv = plpy.execute("""
                           SELECT sum(
@@ -212,13 +271,15 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                           )
         duality_gap = rv[0]['gap']
 
+        if verbosity>0:
+            plpy.info('duality gap time in iteration {0}: {1}'.format(iter, time()-start))
+
         if duality_gap<threshold*dual:
             break
         elif verbosity>0:
             plpy.info('duality_gap: {0}, threshold:{1}, dual:{2}, ratio:{3}'.format(duality_gap, threshold, dual, duality_gap/dual))
 
 
-        max_iter = max_iter-1
 
     plpy.execute('drop table if exists ' + model_table);
     plpy.execute("""
@@ -259,7 +320,7 @@ def classify(schema_madlib, input_table, data_col, id_col, model_table, output_t
                 INSERT INTO {0}
                     SELECT {1},
                            sum(m.alpha*m.y*"""+k_func.format(x1='m.x',x2=data_col)+""")
-                           -avg(m.b)
+                           -coalesce(avg(m.b), 0)
                     FROM {2} m CROSS JOIN {3} t
                     GROUP BY {4}
                 """).format(output_table, id_col, 
