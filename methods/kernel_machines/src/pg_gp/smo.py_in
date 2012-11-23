@@ -67,6 +67,11 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                  """.format(id_col = id_col, feature_col = feature_col, 
                             dependent_col = dependent_col, src_table=input_table)
                  )
+    plpy.execute('DROP TABLE IF EXISTS smo_train_temp2')
+    plpy.execute("CREATE TEMP TABLE smo_train_temp2 (LIKE smo_train_temp)")
+
+    src_table = 'smo_train_temp'
+    dst_table = 'smo_train_temp2'
     plpy.execute("DROP TABLE IF EXISTS smo_train_iteration")
     plpy.execute("""
         CREATE TEMP TABLE smo_train_iteration AS
@@ -82,9 +87,10 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
     dual = 0.0
     iter = 0
     scan_all = True
-    
+    scan_all_next = True
     while iter<max_iter:
         iter = iter+1
+        scan_all = scan_all_next
         if not scan_all:
             where_cond = 'WHERE alpha>0 AND alpha<{C}'.format(C=C)
         else:
@@ -110,9 +116,9 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                                         'infinity'::float8
                                    END
                             ) as b_up
-                FROM smo_train_temp
+                FROM {src_table}
                 {where_cond}
-                """.format( C = C, where_cond = where_cond ) )
+                """.format( C = C, where_cond = where_cond, src_table = src_table ) )
         if verbosity>0:
             plpy.info('Find alpha time in iteration {0}: {1}'.format(iter, time()-start))
 
@@ -134,11 +140,11 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                     FROM
                     (
                         SELECT t.f, t.alpha, t.id, t.dependent_val, t.feature
-                        FROM smo_train_temp t, b_temp_table b
+                        FROM {src_table} t, b_temp_table b
                         WHERE t.f = b.b_low AND {where_cond}
                         LIMIT 1
                     ) l
-                    """.format(where_cond=where_cond))
+                    """.format(where_cond=where_cond, src_table = src_table))
 
         if scan_all:
             where_cond = """
@@ -156,11 +162,11 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                     FROM
                     (
                         SELECT t.f, t.alpha, t.id, t.dependent_val, t.feature
-                        FROM smo_train_temp t, b_temp_table b
+                        FROM {src_table} t, b_temp_table b
                         WHERE t.f = b.b_up AND {where_cond}
                         LIMIT 1
                     ) l
-                    """.format(where_cond=where_cond))
+                    """.format(where_cond=where_cond, src_table = src_table))
 
         if verbosity>0:
             plpy.info('Store alpha time in iteration {0}: {1}'.format(iter, time()-start))
@@ -188,10 +194,10 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
             if scan_all:
                 break
             else:
-                scan_all = True
+                scal_all_next = True
                 continue
         else:
-            scan_all = False
+            scal_all_next = False
             if verbosity>0:
                 plpy.info('b_low-b_up: {0}, threshold:{1}, b_low:{2}, b_up:{3}'.format(b_low-b_up, threshold, b_low, b_up))
             
@@ -207,7 +213,7 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                 plpy.warning('invalid number. L_low: {0}, H_low:{1}'.format(L_low, H_low))                
                 break
             else:
-                scan_all = True
+                scal_all_next = True
                 continue
 
         if (deri>0):
@@ -249,9 +255,10 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
         
         #plpy.execute('ANALYZE smo_train_temp')
         #plpy.execute('ANALYZE smo_train_iteration')
-
-        plpy.execute("""
-                     CREATE TEMP TABLE smo_train_temp2 AS
+        
+        plpy.execute('TRUNCATE {dst_table}'.format(dst_table = dst_table))
+        plpy.execute(("""
+                     INSERT INTO {dst_table}
                         SELECT id, feature, dependent_val,
                                 CASE WHEN(t.id=l.i_low) THEN
                                     alpha_low_new
@@ -265,14 +272,13 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                                 f+(alpha_low_new-alpha_low)*y_low*"""+k_func.format(x1='x_low',x2='feature')+"""
                                 +(alpha_up_new-alpha_up)*y_up*"""+k_func.format(x1='x_up',x2='feature') +""" AS f
                         FROM
-                        smo_train_iteration l CROSS JOIN smo_train_temp t
-                      """.format(alpha_low_new=str(alpha_low_new),
-                                 alpha_up_new=str(alpha_up_new))
+                        smo_train_iteration l CROSS JOIN {src_table} t
+                      """).format(src_table=str(src_table),
+                                 dst_table=str(dst_table))
                       )
-
-        plpy.execute("""DROP TABLE IF EXISTS smo_train_temp""")
-
-        plpy.execute("""ALTER TABLE smo_train_temp2 RENAME to smo_train_temp""")
+        temp_str = src_table
+        src_table = dst_table
+        dst_table = temp_str
 
         if verbosity>0:
             plpy.info('Update f time in iteration {0}: {1}'.format(iter, time()-start))
@@ -281,9 +287,9 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
 
         rv =  plpy.execute("""
                             SELECT avg(f) b
-                            FROM smo_train_temp
+                            FROM {src_table}
                             WHERE alpha>0 and alpha<{C}
-                            """.format(C = str(C)))
+                            """.format(C = str(C), src_table=src_table))
 
         b = rv[0]['b']
         
@@ -299,8 +305,8 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                                     END
                                     ) AS gap
                           FROM
-                          smo_train_temp
-                          """.format( C =str(C), schema_madlib=schema_madlib, b=str(b) )
+                          {src_table}
+                          """.format( C =str(C), schema_madlib=schema_madlib, b=str(b),src_table=src_table )
                           )
         duality_gap = rv[0]['gap']
 
@@ -308,13 +314,8 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
             plpy.info('duality gap time in iteration {0}: {1}'.format(iter, time()-start))
 
         if (duality_gap<threshold*dual):
-            if scan_all:
-                break
-            else:
-                scan_all = True
-                continue
+            break
         else:
-            scan_all = False
             if verbosity>0:
                 plpy.info('duality_gap: {0}, threshold:{1}, dual:{2}, ratio:{3}'.format(duality_gap, threshold, dual, duality_gap/dual))
 
