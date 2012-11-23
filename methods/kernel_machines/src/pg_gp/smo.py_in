@@ -172,6 +172,7 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                 break
             else:
                 scan_all = True
+                continue
         else:
             scan_all = False
             if verbosity>0:
@@ -185,9 +186,12 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
             H_low = min(C, alpha_low+alpha_up)
         
         if L_low>H_low:
-            plpy.warning('invalid number. L_low: {0}, H_low:{1}'.format(L_low, H_low))
-            break
-
+            if scan_all:
+                plpy.warning('invalid number. L_low: {0}, H_low:{1}'.format(L_low, H_low))                
+                break
+            else:
+                scan_all = True
+                continue
 
         if (deri>0):
             alpha_low_new = alpha_low+y_low*(b_up-b_low)/deri
@@ -291,6 +295,7 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                 break
             else:
                 scan_all = True
+                continue
         else:
             scan_all = False
             if verbosity>0:
