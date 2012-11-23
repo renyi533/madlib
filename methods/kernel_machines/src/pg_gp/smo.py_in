@@ -117,6 +117,15 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
             plpy.info('Find alpha time in iteration {0}: {1}'.format(iter, time()-start))
 
         start = time()
+
+        if scan_all:
+            where_cond = """
+                        ((alpha>0 AND alpha<{C}) OR 
+                                (alpha={C} AND dependent_val>0) OR
+                                (alpha=0 AND dependent_val<0))""".format(C=C)
+        else:
+            where_cond = """ (alpha>0 AND alpha<{C})""".format(C=C)
+
         plpy.execute("""
                     UPDATE smo_train_iteration
                     SET 
@@ -126,10 +135,18 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                     (
                         SELECT t.f, t.alpha, t.id, t.dependent_val, t.feature
                         FROM smo_train_temp t, b_temp_table b
-                        WHERE t.f = b.b_low
+                        WHERE t.f = b.b_low AND {where_cond}
                         LIMIT 1
                     ) l
-                    """)
+                    """.format(where_cond=where_cond))
+
+        if scan_all:
+            where_cond = """
+                        ((alpha>0 AND alpha<{C}) OR 
+                                (alpha={C} AND dependent_val<0) OR
+                                (alpha=0 AND dependent_val>0))""".format(C=C)
+        else:
+            where_cond = """ (alpha>0 AND alpha<{C})""".format(C=C)
 
         plpy.execute("""
                     UPDATE smo_train_iteration
@@ -140,10 +157,10 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                     (
                         SELECT t.f, t.alpha, t.id, t.dependent_val, t.feature
                         FROM smo_train_temp t, b_temp_table b
-                        WHERE t.f = b.b_up
+                        WHERE t.f = b.b_up AND {where_cond}
                         LIMIT 1
                     ) l
-                    """)
+                    """.format(where_cond=where_cond))
 
         if verbosity>0:
             plpy.info('Store alpha time in iteration {0}: {1}'.format(iter, time()-start))
