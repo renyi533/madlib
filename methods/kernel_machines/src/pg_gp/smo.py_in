@@ -81,8 +81,14 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                    """)
     dual = 0.0
     iter = 0
+    scan_all = True
+    
     while iter<max_iter:
         iter = iter+1
+        if not scan_all:
+            where_cond = 'WHERE alpha>0 AND alpha<{C}'.format(C=C)
+        else:
+            where_cond = ''
         start = time()
         plpy.execute("DROP TABLE IF EXISTS b_temp_table")
         plpy.execute("""
@@ -105,7 +111,8 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                                    END
                             ) as b_up
                 FROM smo_train_temp
-                """.format( C = C ) )
+                {where_cond}
+                """.format( C = C, where_cond = where_cond ) )
         if verbosity>0:
             plpy.info('Find alpha time in iteration {0}: {1}'.format(iter, time()-start))
 
@@ -161,9 +168,14 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
             plpy.info('after get alpha from table. deri:{0},alpha_low:{1},alpha_up:{2},i_low:{3},i_up:{4} '.format(deri, alpha_low, alpha_up,i_low,i_up));
 
         if (b_low-b_up<threshold):
-            break
-        elif verbosity>0:
-            plpy.info('b_low-b_up: {0}, threshold:{1}, b_low:{2}, b_up:{3}'.format(b_low-b_up, threshold, b_low, b_up))
+            if scan_all:
+                break
+            else:
+                scan_all = True
+        else:
+            scan_all = False
+            if verbosity>0:
+                plpy.info('b_low-b_up: {0}, threshold:{1}, b_low:{2}, b_up:{3}'.format(b_low-b_up, threshold, b_low, b_up))
             
         if (y_low != y_up):
             L_low = max(0, alpha_low-alpha_up)
@@ -274,12 +286,15 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
         if verbosity>0:
             plpy.info('duality gap time in iteration {0}: {1}'.format(iter, time()-start))
 
-        if duality_gap<threshold*dual:
-            break
-        elif verbosity>0:
-            plpy.info('duality_gap: {0}, threshold:{1}, dual:{2}, ratio:{3}'.format(duality_gap, threshold, dual, duality_gap/dual))
-
-
+        if (duality_gap<threshold*dual):
+            if scan_all:
+                break
+            else:
+                scan_all = True
+        else:
+            scan_all = False
+            if verbosity>0:
+                plpy.info('duality_gap: {0}, threshold:{1}, dual:{2}, ratio:{3}'.format(duality_gap, threshold, dual, duality_gap/dual))
 
     plpy.execute('drop table if exists ' + model_table);
     plpy.execute("""
