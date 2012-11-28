@@ -97,7 +97,7 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
             where_cond = ''
         start = time()
         plpy.execute("DROP TABLE IF EXISTS b_temp_table")
-        plpy.execute("""
+        query ="""
             CREATE TEMP TABLE b_temp_table
                 AS
                 SELECT max( CASE WHEN ((alpha>0 AND alpha<{C}) OR 
@@ -118,57 +118,89 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                             ) as b_up
                 FROM {src_table}
                 {where_cond}
-                """.format( C = C, where_cond = where_cond, src_table = src_table ) )
+                """.format( C = C, where_cond = where_cond, src_table = src_table )
+        plpy.execute(query)
         if verbosity>0:
+            plpy.info(query)
             plpy.info('Find alpha time in iteration {0}: {1}'.format(iter, time()-start))
 
         start = time()
 
         if scan_all:
-            where_cond = """
+            where_cond_low = """
                         ((alpha>0 AND alpha<{C}) OR 
                                 (alpha={C} AND dependent_val>0) OR
                                 (alpha=0 AND dependent_val<0))""".format(C=C)
         else:
-            where_cond = """ (alpha>0 AND alpha<{C})""".format(C=C)
-
-        plpy.execute("""
-                    UPDATE smo_train_iteration
-                    SET 
-                    b_low = f, alpha_low = alpha, i_low = id, 
-                    y_low = dependent_val, x_low = feature
-                    FROM
-                    (
-                        SELECT t.f, t.alpha, t.id, t.dependent_val, t.feature
-                        FROM {src_table} t, b_temp_table b
-                        WHERE t.f = b.b_low AND {where_cond}
-                        LIMIT 1
-                    ) l
-                    """.format(where_cond=where_cond, src_table = src_table))
+            where_cond_low = """ (alpha>0 AND alpha<{C})""".format(C=C)
 
         if scan_all:
-            where_cond = """
+            where_cond_up = """
                         ((alpha>0 AND alpha<{C}) OR 
                                 (alpha={C} AND dependent_val<0) OR
                                 (alpha=0 AND dependent_val>0))""".format(C=C)
         else:
-            where_cond = """ (alpha>0 AND alpha<{C})""".format(C=C)
+            where_cond_up = """ (alpha>0 AND alpha<{C})""".format(C=C)
+        
+        plpy.execute('DROP TABLE IF EXISTS smo_up_low_table')
 
-        plpy.execute("""
-                    UPDATE smo_train_iteration
-                    SET 
-                    b_up = f, alpha_up = alpha, i_up = id, 
-                    y_up = dependent_val, x_up = feature
-                    FROM
-                    (
-                        SELECT t.f, t.alpha, t.id, t.dependent_val, t.feature
-                        FROM {src_table} t, b_temp_table b
-                        WHERE t.f = b.b_up AND {where_cond}
-                        LIMIT 1
-                    ) l
-                    """.format(where_cond=where_cond, src_table = src_table))
+        query = """
+                CREATE TEMP TABLE smo_up_low_table
+                    AS
+                    SELECT s.f, s.alpha, s.id, s.dependent_val, s.feature,
+                           b.b_low, b.b_up
+                    FROM  b_temp_table b  CROSS JOIN {src_table} s
+                    WHERE 
+                          (
+                            (s.f = b.b_low AND {where_cond_low})
+                                OR
+                            (s.f = b.b_up AND {where_cond_up})
+                          )
+                 """.format(where_cond_low = where_cond_low,
+                                where_cond_up = where_cond_up,
+                                src_table = src_table)
 
         if verbosity>0:
+            plpy.info(query)
+                    
+        plpy.execute(query)
+
+        
+        query = """
+                    UPDATE smo_train_iteration t
+                    SET
+                        b_low = l.b_low,
+                        alpha_low = l.alpha,
+                        i_low = l.id,
+                        y_low = l.dependent_val,
+                        x_low = l.feature
+                    FROM (
+                        SELECT * FROM smo_up_low_table
+                        WHERE f=b_low LIMIT 1
+                    ) l
+                    """
+        plpy.execute(query)
+
+        if verbosity>0:
+            plpy.info(query)
+
+        query = """
+                    UPDATE smo_train_iteration t
+                    SET
+                        b_up = l.b_up,
+                        alpha_up = l.alpha,
+                        i_up = l.id,
+                        y_up = l.dependent_val,
+                        x_up = l.feature
+                    FROM (
+                        SELECT * FROM smo_up_low_table
+                        WHERE f=b_up LIMIT 1
+                    ) l
+                    """
+        plpy.execute(query)
+
+        if verbosity>0:
+            plpy.info(query)
             plpy.info('Store alpha time in iteration {0}: {1}'.format(iter, time()-start))
 
         start = time()
@@ -180,6 +212,8 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
 
         y_low = rv[0]['y_low']
         y_up = rv[0]['y_up']
+        x_up = rv[0]['x_up']
+        x_low = rv[0]['x_low']
         b_low = rv[0]['b_low']
         b_up = rv[0]['b_up']
         alpha_low = rv[0]['alpha_low']
@@ -188,7 +222,14 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
         i_up  = rv[0]['i_up']
         deri = rv[0]['deri']
         if verbosity>0:
-            plpy.info('after get alpha from table. deri:{0},alpha_low:{1},alpha_up:{2},i_low:{3},i_up:{4} '.format(deri, alpha_low, alpha_up,i_low,i_up));
+            plpy.info("""
+                    after get alpha from table. deri:{0},alpha_low:{1},alpha_up:{2},
+                    i_low:{3},i_up:{4},
+                    x_low:{5}, 
+                    x_up:{6},
+                    y_low:{7},
+                    y_up:{8}
+                    """.format(deri, alpha_low, alpha_up,i_low,i_up, x_low, x_up,y_low,y_up));
 
         if (b_low-b_up<threshold):
             if scan_all:
