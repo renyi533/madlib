@@ -160,12 +160,13 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
                                 where_cond_up = where_cond_up,
                                 src_table = src_table)
 
-        if verbosity>0:
-            plpy.info(query)
-                    
         plpy.execute(query)
 
-        
+        if verbosity>0:
+            plpy.info(query)
+            plpy.info('Construct up/low table time in iteration {0}: {1}'.format(iter, time()-start))
+
+        start = time()
         query = """
                     UPDATE smo_train_iteration t
                     SET
