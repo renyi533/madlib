@@ -167,14 +167,15 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
             plpy.info('Construct up/low table time in iteration {0}: {1}'.format(iter, time()-start))
 
         start = time()
+        plpy.execute("DROP TABLE IF EXISTS smo_train_iteration_temp")
         query = """
-                    UPDATE smo_train_iteration t
-                    SET
-                        b_low = l.b_low,
-                        alpha_low = l.alpha,
-                        i_low = l.id,
-                        y_low = l.dependent_val,
-                        x_low = l.feature
+                    CREATE TEMP TABLE smo_train_iteration_temp AS
+                    SELECT
+                        l.b_low AS b_low,
+                        l.alpha AS alpha_low,
+                        l.id AS i_low,
+                        l.dependent_val AS y_low,
+                        l.feature AS x_low
                     FROM (
                         SELECT * FROM smo_up_low_table
                         WHERE f=b_low LIMIT 1
@@ -185,18 +186,22 @@ def train(schema_madlib, input_table , id_col , feature_col , dependent_col , mo
         if verbosity>0:
             plpy.info(query)
 
+        plpy.execute("DROP TABLE IF EXISTS smo_train_iteration")
         query = """
-                    UPDATE smo_train_iteration t
-                    SET
-                        b_up = l.b_up,
-                        alpha_up = l.alpha,
-                        i_up = l.id,
-                        y_up = l.dependent_val,
-                        x_up = l.feature
+                    CREATE TEMP TABLE smo_train_iteration AS
+                    SELECT
+                        l.b_up AS b_up,
+                        l.alpha AS alpha_up,
+                        l.id AS i_up,
+                        l.dependent_val AS y_up,
+                        l.feature AS x_up,
+                        t.*,
+                        0.0::float8 alpha_low_new, 
+                        0.0::float8 alpha_up_new
                     FROM (
                         SELECT * FROM smo_up_low_table
                         WHERE f=b_up LIMIT 1
-                    ) l
+                    ) l CROSS JOIN smo_train_iteration_temp t
                     """
         plpy.execute(query)
 
