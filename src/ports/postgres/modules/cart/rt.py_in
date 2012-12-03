@@ -675,7 +675,8 @@ def __train_tree(
     __generate_final_tree(
         madlib_schema, 
         result_tree_tbl_name,
-        rt_type)
+        rt_type,
+        tmp_hori_tbl_name)
     if verbosity > 0:
         plpy.info(
             ("generate final tree time:" +
@@ -708,13 +709,16 @@ def __train_tree(
 def __generate_final_tree(
         madlib_schema,
         result_tree_tbl_name,
-        rt_type):
+        rt_type,
+        enc_table_name
+        ):
     """
     @brief Generate the final trained tree.
 
     @param madlib_schema        The name of the madlib schema.
     @param result_tree_tbl_name The name of the table containing the tree.
     @param rt_type              The type of the regression tree.
+    @param enc_table_name       The name of the table containing the encoded data.
     """
     plpy.execute(
         """
@@ -813,6 +817,8 @@ def __generate_final_tree(
                        level = curr_level))
 
         curr_level = curr_level-1
+
+    __fit_linear_model(madlib_schema, result_tree_tbl_name, enc_table_name)
 
 
 def display(madlib_schema, rt_tbl_name):
@@ -2123,7 +2129,7 @@ def __fit_linear_model(
     @param madlib_schema        The name of the madlib schema.
     @param tree_tbl_name        The name of the table defines the trained 
                                 regression tree.
-    @param enc_tbl_name         The name of the table with the source data.
+    @param enc_tbl_name         The name of the table with the encoded source data.
     """
     begin_predict_time = datetime.datetime.now()
     table_pick = 0
@@ -2153,14 +2159,14 @@ def __fit_linear_model(
     num_of_samples = preproc.__size_of_table(
         madlib_schema,
         enc_tbl_name)
-
+    plpy.info('metatable_name:'+metatable_name+',num_of_samples:'+str(num_of_samples))
     plpy.execute("DROP TABLE IF EXISTS enc_instance_ping")
     plpy.execute(
         """
         CREATE TEMP TABLE enc_instance_ping
         (
             id              BIGINT,
-            node            INT,
+            node            INT
         )
         m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)');
         """)
@@ -2171,7 +2177,7 @@ def __fit_linear_model(
         CREATE TEMP TABLE enc_instance_pong
         (
             id              BIGINT,
-            node            INT,
+            node            INT
         )
         m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)');
         """)
@@ -2184,7 +2190,7 @@ def __fit_linear_model(
         FROM {enc_tbl_name} m
         CROSS JOIN
         (
-            SELECT DISTINCT id
+            SELECT MIN(id) id
             FROM {tree_tbl_name}
             WHERE parent_id = 0
         ) t
@@ -2193,6 +2199,7 @@ def __fit_linear_model(
             enc_tbl_name = enc_tbl_name,
             tree_tbl_name = tree_tbl_name))
     
+    plpy.info('root node OK')
     # Check the regression tree whether is empty.
     t = plpy.execute(
         """
@@ -2218,40 +2225,47 @@ def __fit_linear_model(
         if remains == 0:
             break
 
+        plpy.info('Remaining {0}'.format(remains))
+        
         plpy.execute(
             """
             UPDATE {tree_tbl_name} t
             SET coef_vals = l.coef
             FROM
             (
-                SELECT pt.node,
-                       {madlib_schema}.linregr
+                SELECT node,
+                       ({madlib_schema}.linregr
                             (
                             predict_val,
                             {madlib_schema}.__get_selected_feature(fvals, fids)
-                            ).coef
+                            )).coef
                 FROM
                 (
-                    SELECT t1.id, t1.node, fvals
-                    FROM {table2} t1
-                    INNER JOIN {enc_tbl_name} t2 ON t1.id = t2.id
-                ) AS pt,
-                (
-                    SELECT lmc_nid, lmc_fval, predict_val, parent_id, id, is_cont,
-                           split_value, feature, fids
-                    FROM {tree_tbl_name}
-                    WHERE array_upper(tree_location, 1) = {curr_level}
-                ) AS gt
-                WHERE pt.node = gt.id
-                GROUP BY pt.node
+                    SELECT *
+                    FROM
+                    (
+                        SELECT t1.id, t1.node, t2.fvals, t2.predict_val
+                        FROM {curr_table} t1
+                        INNER JOIN {enc_tbl_name} t2 ON t1.id = t2.id
+                    ) AS pt,
+                    (
+                        SELECT id, fids
+                        FROM {tree_tbl_name}
+                        WHERE array_upper(tree_location, 1) = {curr_level}
+                    ) AS gt
+                    WHERE pt.node = gt.id
+                ) m
+                GROUP BY node
             ) l
             WHERE t.id = l.node
             """.format(
-                table1 = table_names[table_pick],
-                table2 = table_names[(table_pick + 1) % 2],
+                curr_table = table_names[table_pick],
                 enc_tbl_name = enc_tbl_name,
                 tree_tbl_name = tree_tbl_name,
-                curr_level = curr_level))
+                curr_level = curr_level,
+                madlib_schema = madlib_schema))
+
+        plpy.info('Update Coefs')
 
         # Update assoc table
         table_pick = (table_pick + 1) % 2
@@ -2296,6 +2310,8 @@ def __fit_linear_model(
                 tree_tbl_name = tree_tbl_name,
                 curr_level = curr_level))
 
+        plpy.info('Walk tree')
+
         # Delete from the being classified data table
         plpy.execute(
             """
@@ -2308,28 +2324,3 @@ def __fit_linear_model(
             """.format(
                 table_name = table_names[table_pick],
                 tree_tbl_name = tree_tbl_name))
-    
-    plpy.execute(
-        """
-        INSERT INTO {result_tbl_name}
-        SELECT id, predict_val
-        FROM {table_name}
-        WHERE jump = 0
-        """.format(
-            result_tbl_name = result_tbl_name,
-            table_name = table_names[table_pick]))
-    plpy.execute(
-        """
-        INSERT INTO {result_tbl_name}
-        SELECT id, predict_val
-        FROM {table_name}
-        WHERE jump = 0
-        """.format(
-            result_tbl_name = result_tbl_name,
-            table_name = table_names[(table_pick + 1) % 2]))
-    
-    # Record the prediction time.
-    ret.prediction_time = datetime.datetime.now() - begin_predict_time
-    
-    return ret
-
