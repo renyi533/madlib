@@ -122,7 +122,7 @@ def train(
                                         0 is the initial point (no value). But
                                         this path does not specify which 
                                         feature was used for the branching
-            fids            FLOAT8[]    For "model" regression trees, this 
+            fids            INT[]       For "model" regression trees, this 
                                         array contains the IDs of the features
                                         used to predict the dependent variable 
                                         in this node. 
@@ -179,7 +179,7 @@ def train(
         node_prune_threshold,
         node_split_threshold,
         verbosity)
-
+    
     # The provided columns must be in the training table.
     begin_t = datetime.datetime.now()
     __validate_provided_columns(
@@ -674,7 +674,8 @@ def __train_tree(
     begin_t = datetime.datetime.now()
     __generate_final_tree(
         madlib_schema, 
-        result_tree_tbl_name)
+        result_tree_tbl_name,
+        rt_type)
     if verbosity > 0:
         plpy.info(
             ("generate final tree time:" +
@@ -706,17 +707,25 @@ def __train_tree(
 
 def __generate_final_tree(
         madlib_schema,
-        result_tree_tbl_name):
+        result_tree_tbl_name,
+        rt_type):
     """
     @brief Generate the final trained tree.
 
     @param madlib_schema        The name of the madlib schema.
     @param result_tree_tbl_name The name of the table containing the tree.
+    @param rt_type              The type of the regression tree.
     """
     plpy.execute(
         """
         DELETE FROM {result_tree_tbl_name}
         WHERE coalesce(num_of_samples, 0) = 0
+        """.format(result_tree_tbl_name = result_tree_tbl_name))
+
+    plpy.execute(
+        """
+        UPDATE {result_tree_tbl_name} k
+        SET fids = array[0], coef_vals = array[predict_val]
         """.format(result_tree_tbl_name = result_tree_tbl_name))
 
     # For each node, find the left most child node id and the feature value,
@@ -736,6 +745,74 @@ def __generate_final_tree(
         ) g
         WHERE k.id = g.parent_id
         """.format(result_tree_tbl_name = result_tree_tbl_name))
+
+    if rt_type == 'const_value':
+        return
+
+    rv = plpy.execute(
+                    """
+                    SELECT max(array_upper(tree_location, 1)) AS level
+                    FROM {result_tree_tbl_name}
+                    """.format(result_tree_tbl_name = result_tree_tbl_name))
+    max_level = rv[0]['level']
+    curr_level = max_level
+
+    plpy.execute(
+        """
+        UPDATE {result_tree_tbl_name} k
+        SET feature = 0, fids = array[0], variance_gain = 0
+        WHERE lmc_nid IS NULL
+        """.format(result_tree_tbl_name = result_tree_tbl_name,
+                   level = max_level))
+
+    plpy.execute(
+        """
+        CREATE TEMP TABLE temp_parent_track
+            AS
+        SELECT id, parent_id 
+        FROM {result_tree_tbl_name}
+        m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)')
+        """.format(result_tree_tbl_name = result_tree_tbl_name))
+
+    while curr_level>0:
+        plpy.execute(
+            """
+            UPDATE {result_tree_tbl_name} t
+            SET fids = array_append(l.fids, t.feature)
+            FROM
+            (
+                SELECT parent_id, 
+                       array_agg(feature ORDER BY feature ASC) AS fids
+                FROM
+                (
+                    SELECT n.parent_id, l.feature
+                    FROM {result_tree_tbl_name} l, temp_parent_track n
+                    WHERE l.id = n.id AND 
+                          array_upper(l.tree_location,1) = {level}
+                    GROUP BY n.parent_id, l.feature
+                ) m
+                GROUP BY parent_id
+            ) l
+            WHERE t.id = l.parent_id
+            """.format(result_tree_tbl_name = result_tree_tbl_name,
+                       level = curr_level))
+
+        plpy.execute(
+            """
+            UPDATE temp_parent_track t
+            SET parent_id = l.parent_id
+            FROM
+            (
+                SELECT m.* 
+                FROM temp_parent_track m, {result_tree_tbl_name} t
+                WHERE m.id = t.id AND 
+                      array_upper(tree_location,1) = ({level}-1)
+            ) l
+            WHERE t.parent_id = l.id
+            """.format(result_tree_tbl_name = result_tree_tbl_name,
+                       level = curr_level))
+
+        curr_level = curr_level-1
 
 
 def display(madlib_schema, rt_tbl_name):
@@ -1077,18 +1154,24 @@ def predict(
     plpy.execute(
         """
         INSERT INTO predict_instance_ping(id, jump, predict_val)
-        SELECT m.{id_col_name}, t.id, t.predict_val
+        SELECT m.{id_col_name}, t.id, 
+               {madlib_schema}.svec_dot
+                        (
+                        t.coef_vals,
+                        {madlib_schema}.__get_selected_feature(m.fvals, t.fids)
+                        )           
         FROM {enc_tbl_name} m
         CROSS JOIN
         (
-            SELECT DISTINCT id, predict_val
+            SELECT DISTINCT id, fids, coef_vals
             FROM {tree_tbl_name}
             WHERE parent_id = 0
         ) t
         """.format(
             id_col_name = id_col_name,
             enc_tbl_name = enc_tbl_name,
-            tree_tbl_name = tree_tbl_name))
+            tree_tbl_name = tree_tbl_name,
+            madlib_schema = madlib_schema))
     
     # Check the regression tree whether is empty.
     t = plpy.execute(
@@ -1138,7 +1221,12 @@ def predict(
                                        gt.lmc_fval
                         END
                    END AS newjump,
-                   gt.predict_val, gt.parent_id, gt.id
+                   {madlib_schema}.svec_dot
+                        (
+                        gt.coef_vals,
+                        {madlib_schema}.__get_selected_feature(pt.fvals, gt.fids)
+                        ),   
+                   gt.parent_id, gt.id
             FROM
             (
                 SELECT t1.id, t1.jump, fvals
@@ -1147,7 +1235,7 @@ def predict(
             ) AS pt,
             (
                 SELECT lmc_nid, lmc_fval, predict_val, parent_id, id, is_cont,
-                       split_value, feature
+                       split_value, feature, coef_vals, fids
                 FROM {tree_tbl_name}
                 WHERE array_upper(tree_location, 1) = {curr_level}
             ) AS gt
@@ -1157,7 +1245,8 @@ def predict(
                 table2 = table_names[(table_pick + 1) % 2],
                 enc_tbl_name = enc_tbl_name,
                 tree_tbl_name = tree_tbl_name,
-                curr_level = curr_level))
+                curr_level = curr_level,
+                madlib_schema = madlib_schema))
 
         # If the node (whose id is "jump") doesn't exist,
         # then insert them into result table
@@ -1804,7 +1893,7 @@ def __create_tree_table(madlib_schema, result_tree_tbl_name):
         (
             id              INT,
             tree_location   INT[],
-            fids            FLOAT8[],
+            fids            INT[],
             coef_vals       FLOAT8[],
             feature         INT,
             is_cont         BOOLEAN,
@@ -2023,7 +2112,224 @@ def score(
     return util.__get_query_value(t, 'rrse')
 
 
+def __fit_linear_model(
+        madlib_schema,
+        tree_tbl_name,
+        enc_tbl_name
+        ):
+    """
+    @brief fit linear model to the dataset.
 
+    @param madlib_schema        The name of the madlib schema.
+    @param tree_tbl_name        The name of the table defines the trained 
+                                regression tree.
+    @param enc_tbl_name         The name of the table with the source data.
+    """
+    begin_predict_time = datetime.datetime.now()
+    table_pick = 0
+    id_col_name = 'id'
+    curr_level = 1
+    max_level = 0
+    h2hmv_routine_id = 0
+    table_names = ['enc_instance_ping', 'enc_instance_pong']
+    
+    # Check the parameters.
+    util.__assert(
+        enc_tbl_name is not None and
+        util.__table_exists(madlib_schema, enc_tbl_name),
+        ('the specified encoding table <' + enc_tbl_name +
+         '> does not exists'))
 
+    util.__assert(
+        tree_tbl_name is not None and
+        util.__table_exists(madlib_schema, tree_tbl_name),
+        ('the specified tree table <' + tree_tbl_name +
+         '> does not exists'))
 
+    
+    # Get the metatable name, routine id, number of the samples.
+    metatable_name = dt.__get_metatable_name(madlib_schema, tree_tbl_name)
+    h2hmv_routine_id = dt.__get_routine_id(madlib_schema, tree_tbl_name)
+    num_of_samples = preproc.__size_of_table(
+        madlib_schema,
+        enc_tbl_name)
+
+    plpy.execute("DROP TABLE IF EXISTS enc_instance_ping")
+    plpy.execute(
+        """
+        CREATE TEMP TABLE enc_instance_ping
+        (
+            id              BIGINT,
+            node            INT,
+        )
+        m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)');
+        """)
+
+    plpy.execute("DROP TABLE IF EXISTS enc_instance_pong")
+    plpy.execute(
+        """
+        CREATE TEMP TABLE enc_instance_pong
+        (
+            id              BIGINT,
+            node            INT,
+        )
+        m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)');
+        """)
+
+    # Generate the root node.
+    plpy.execute(
+        """
+        INSERT INTO enc_instance_ping(id, node)
+        SELECT m.{id_col_name}, t.id
+        FROM {enc_tbl_name} m
+        CROSS JOIN
+        (
+            SELECT DISTINCT id
+            FROM {tree_tbl_name}
+            WHERE parent_id = 0
+        ) t
+        """.format(
+            id_col_name = id_col_name,
+            enc_tbl_name = enc_tbl_name,
+            tree_tbl_name = tree_tbl_name))
+    
+    # Check the regression tree whether is empty.
+    t = plpy.execute(
+        """
+        SELECT MAX(array_upper(tree_location, 1)) AS max
+        FROM {tree_tbl_name}
+        """.format(
+            tree_tbl_name = tree_tbl_name))
+    max_level = util.__get_query_value(t, 'max')
+    if max_level is None or max_level == 0:
+        plpy.error("Tree should not be empty")
+
+    # Begin the model building level by level.
+    for curr_level in xrange(1, max_level + 1):
+        # Loop exit. If there is no data remaining,
+        # break the loop.
+        t = plpy.execute(
+            """
+            SELECT COUNT(*) AS count 
+            FROM {curr_table}
+            """.format(
+                curr_table = table_names[table_pick]))
+        remains = util.__get_query_value(t, 'count')
+        if remains == 0:
+            break
+
+        plpy.execute(
+            """
+            UPDATE {tree_tbl_name} t
+            SET coef_vals = l.coef
+            FROM
+            (
+                SELECT pt.node,
+                       {madlib_schema}.linregr
+                            (
+                            predict_val,
+                            {madlib_schema}.__get_selected_feature(fvals, fids)
+                            ).coef
+                FROM
+                (
+                    SELECT t1.id, t1.node, fvals
+                    FROM {table2} t1
+                    INNER JOIN {enc_tbl_name} t2 ON t1.id = t2.id
+                ) AS pt,
+                (
+                    SELECT lmc_nid, lmc_fval, predict_val, parent_id, id, is_cont,
+                           split_value, feature, fids
+                    FROM {tree_tbl_name}
+                    WHERE array_upper(tree_location, 1) = {curr_level}
+                ) AS gt
+                WHERE pt.node = gt.id
+                GROUP BY pt.node
+            ) l
+            WHERE t.id = l.node
+            """.format(
+                table1 = table_names[table_pick],
+                table2 = table_names[(table_pick + 1) % 2],
+                enc_tbl_name = enc_tbl_name,
+                tree_tbl_name = tree_tbl_name,
+                curr_level = curr_level))
+
+        # Update assoc table
+        table_pick = (table_pick + 1) % 2
+        plpy.execute("TRUNCATE " + str(table_names[table_pick]))
+
+        plpy.execute(
+            """
+            INSERT INTO {table1}
+            SELECT pt.id,
+                   CASE WHEN (is_cont) 
+                        THEN
+                             CASE WHEN (gt.lmc_nid IS NULL) THEN 0
+                                  ELSE gt.lmc_nid + 
+                                  float8lt
+                                  (
+                                      gt.split_value, fvals[gt.feature]
+                                  )::INT4 + 1 - gt.lmc_fval
+                             END
+                        ELSE
+                             CASE WHEN (gt.lmc_nid IS NULL) THEN 0
+                                  ELSE gt.lmc_nid + fvals[gt.feature] -
+                                       gt.lmc_fval
+                        END
+                   END AS new_node
+            FROM
+            (
+                SELECT t1.id, t1.node, fvals
+                FROM {table2} t1
+                INNER JOIN {enc_tbl_name} t2 ON t1.id = t2.id
+            ) AS pt,
+            (
+                SELECT lmc_nid, lmc_fval, predict_val, parent_id, id, is_cont,
+                       split_value, feature
+                FROM {tree_tbl_name}
+                WHERE array_upper(tree_location, 1) = {curr_level}
+            ) AS gt
+            WHERE pt.node = gt.id
+            """.format(
+                table1 = table_names[table_pick],
+                table2 = table_names[(table_pick + 1) % 2],
+                enc_tbl_name = enc_tbl_name,
+                tree_tbl_name = tree_tbl_name,
+                curr_level = curr_level))
+
+        # Delete from the being classified data table
+        plpy.execute(
+            """
+            DELETE FROM {table_name}
+            WHERE node NOT IN
+            (
+                SELECT id
+                FROM {tree_tbl_name}
+            )
+            """.format(
+                table_name = table_names[table_pick],
+                tree_tbl_name = tree_tbl_name))
+    
+    plpy.execute(
+        """
+        INSERT INTO {result_tbl_name}
+        SELECT id, predict_val
+        FROM {table_name}
+        WHERE jump = 0
+        """.format(
+            result_tbl_name = result_tbl_name,
+            table_name = table_names[table_pick]))
+    plpy.execute(
+        """
+        INSERT INTO {result_tbl_name}
+        SELECT id, predict_val
+        FROM {table_name}
+        WHERE jump = 0
+        """.format(
+            result_tbl_name = result_tbl_name,
+            table_name = table_names[(table_pick + 1) % 2]))
+    
+    # Record the prediction time.
+    ret.prediction_time = datetime.datetime.now() - begin_predict_time
+    
+    return ret
 

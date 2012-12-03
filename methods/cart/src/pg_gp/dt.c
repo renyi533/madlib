@@ -28,7 +28,7 @@
 #ifndef NO_PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
 #endif
-/*#define __DT_SHOW_DEBUG_INFO__*/
+#define __DT_SHOW_DEBUG_INFO__
 #ifdef __DT_SHOW_DEBUG_INFO__
 #define dtelog(...) elog(__VA_ARGS__)
 #else
@@ -2780,3 +2780,77 @@ Datum dt_array_indexed_agg_ffunc(PG_FUNCTION_ARGS)
 	PG_RETURN_ARRAYTYPE_P(result);
 }
 PG_FUNCTION_INFO_V1(dt_array_indexed_agg_ffunc);
+
+
+/*
+ * @brief This function returns the values of selected features.
+ * 
+ * @param fvals  The vector containing the values of all features.
+ * @param fids   The vector containing the ids of selected features.
+ * 
+ * @return The vector containing the values of selected features.
+ */
+Datum get_selected_feature(PG_FUNCTION_ARGS)
+{
+	ArrayType       * fvals;
+    ArrayType       * fids;
+    ArrayType       * state;
+	ArrayBuildState build_state;
+	Oid             elem_typ = FLOAT8OID;
+	int32_t         iterator_idx;
+
+	fvals         = PG_ARGISNULL(0) ? NULL : PG_GETARG_ARRAYTYPE_P(0);
+	fids          = PG_ARGISNULL(1) ? NULL : PG_GETARG_ARRAYTYPE_P(1);
+    int size      = ARR_DIMS(fids)[0];
+    int dimension = ARR_DIMS(fvals)[0];
+
+    dt_check_error
+        (
+            fvals != NULL && fids!=NULL,
+            "feature array should not be NULL"
+        );
+    float8* c_fvals = (float8*)ARR_DATA_PTR(fvals);
+    int32*  c_fids  = (int32*)ARR_DATA_PTR(fids);
+
+	get_typlenbyvalalign
+        (
+         elem_typ, 
+         &build_state.typlen, 
+         &build_state.typbyval, 
+         &build_state.typalign
+        );
+
+    build_state.mcontext = NULL;
+    build_state.alen    = size;
+    build_state.dvalues = (Datum *) palloc(build_state.alen * sizeof(Datum));
+    build_state.dnulls  = NULL;
+    build_state.nelems  = build_state.alen;
+    build_state.element_type = elem_typ;
+
+    for (iterator_idx = 0; iterator_idx < build_state.alen; iterator_idx++)
+    {
+        dtelog(NOTICE, "ID: %d", c_fids[iterator_idx]); 
+        if ((int32)c_fids[iterator_idx] == 0)
+            build_state.dvalues[iterator_idx]   = Float8GetDatum(1);
+        else
+        {
+            dt_check_error_value
+                (
+                    c_fids[iterator_idx]>0 && c_fids[iterator_idx]<=dimension,
+                    "Invalid feature ID of: %d",
+                    c_fids[iterator_idx]
+                );
+            dtelog(NOTICE, "fval:%f", c_fvals[c_fids[iterator_idx]-1]); 
+            build_state.dvalues[iterator_idx]   = 
+                Float8GetDatum(c_fvals[c_fids[iterator_idx]-1]);
+        }
+    }
+
+    state = construct_array(build_state.dvalues, build_state.nelems,
+        build_state.element_type, build_state.typlen, 
+        build_state.typbyval, build_state.typalign);
+
+    PG_RETURN_ARRAYTYPE_P(state);
+}
+PG_FUNCTION_INFO_V1(get_selected_feature);
+

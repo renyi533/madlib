@@ -615,3 +615,20 @@ RETURNS VOID AS $$
     rt.clean(schema_madlib, rt_tbl_name)
 $$ LANGUAGE PLPYTHONU;
 
+
+/*
+ * @brief This function returns the values of selected features.
+ * 
+ * @param fvals  The vector containing the values of all features.
+ * @param fids   The vector containing the ids of selected features.
+ * 
+ * @return The vector containing the values of selected features.
+ */
+CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__get_selected_feature
+    (
+    fvals  FLOAT8[],
+    fids   INT[]
+    )
+RETURNS FLOAT8[] 
+AS 'MODULE_PATHNAME', 'get_selected_feature'
+LANGUAGE C STRICT IMMUTABLE;
