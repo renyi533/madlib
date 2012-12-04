@@ -676,7 +676,8 @@ def __train_tree(
         madlib_schema, 
         result_tree_tbl_name,
         rt_type,
-        tmp_hori_tbl_name)
+        tmp_hori_tbl_name,
+        verbosity)
     if verbosity > 0:
         plpy.info(
             ("generate final tree time:" +
@@ -685,7 +686,7 @@ def __train_tree(
     # Prune the result regressioni tree.
     if validation_tbl_name is not None:
         begin_t = datetime.datetime.now()
-        __prune_tree(
+        __rep_prune_tree(
             madlib_schema,
             result_tree_tbl_name, 
             validation_tbl_name,
@@ -710,7 +711,8 @@ def __generate_final_tree(
         madlib_schema,
         result_tree_tbl_name,
         rt_type,
-        enc_table_name
+        enc_table_name,
+        verbosity
         ):
     """
     @brief Generate the final trained tree.
@@ -782,7 +784,12 @@ def __generate_final_tree(
         plpy.execute(
             """
             UPDATE {result_tree_tbl_name} t
-            SET fids = array_append(l.fids, t.feature)
+            SET fids = 
+                CASE WHEN(l.fids @> array[t.feature]) THEN
+                    l.fids
+                ELSE
+                    array_append(l.fids, t.feature)
+                END
             FROM
             (
                 SELECT parent_id, 
@@ -818,7 +825,8 @@ def __generate_final_tree(
 
         curr_level = curr_level-1
 
-    __fit_linear_model(madlib_schema, result_tree_tbl_name, enc_table_name)
+    __fit_linear_model(madlib_schema, result_tree_tbl_name, enc_table_name, \
+                       verbosity)
 
 
 def display(madlib_schema, rt_tbl_name):
@@ -1313,7 +1321,7 @@ def predict(
     return ret
 
 
-def __prune_tree(
+def __rep_prune_tree(
         madlib_schema,
         result_tree_tbl_name,
         validation_tbl_name,
@@ -1422,7 +1430,7 @@ def __prune_tree(
                 FROM ({select_stmt}) q
                 GROUP BY parent_id
             ) t
-            WHERE parent_sum < leaf_sum
+            WHERE parent_sum <= leaf_sum
             """.format(
                 select_stmt = select_stmt,
                 rt_prune_select = rt_prune_select))
@@ -2121,7 +2129,8 @@ def score(
 def __fit_linear_model(
         madlib_schema,
         tree_tbl_name,
-        enc_tbl_name
+        enc_tbl_name,
+        verbosity
         ):
     """
     @brief fit linear model to the dataset.
@@ -2166,6 +2175,7 @@ def __fit_linear_model(
         CREATE TEMP TABLE enc_instance_ping
         (
             id              BIGINT,
+            parent          INT,
             node            INT
         )
         m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)');
@@ -2177,6 +2187,7 @@ def __fit_linear_model(
         CREATE TEMP TABLE enc_instance_pong
         (
             id              BIGINT,
+            parent          INT,
             node            INT
         )
         m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)');
@@ -2185,8 +2196,8 @@ def __fit_linear_model(
     # Generate the root node.
     plpy.execute(
         """
-        INSERT INTO enc_instance_ping(id, node)
-        SELECT m.{id_col_name}, t.id
+        INSERT INTO enc_instance_ping(id, parent, node)
+        SELECT m.{id_col_name}, 0, t.id
         FROM {enc_tbl_name} m
         CROSS JOIN
         (
@@ -2199,7 +2210,6 @@ def __fit_linear_model(
             enc_tbl_name = enc_tbl_name,
             tree_tbl_name = tree_tbl_name))
     
-    plpy.info('root node OK')
     # Check the regression tree whether is empty.
     t = plpy.execute(
         """
@@ -2213,20 +2223,6 @@ def __fit_linear_model(
 
     # Begin the model building level by level.
     for curr_level in xrange(1, max_level + 1):
-        # Loop exit. If there is no data remaining,
-        # break the loop.
-        t = plpy.execute(
-            """
-            SELECT COUNT(*) AS count 
-            FROM {curr_table}
-            """.format(
-                curr_table = table_names[table_pick]))
-        remains = util.__get_query_value(t, 'count')
-        if remains == 0:
-            break
-
-        plpy.info('Remaining {0}'.format(remains))
-        
         plpy.execute(
             """
             UPDATE {tree_tbl_name} t
@@ -2265,9 +2261,6 @@ def __fit_linear_model(
                 curr_level = curr_level,
                 madlib_schema = madlib_schema))
 
-        plpy.info('Update Coefs')
-
-        # Update assoc table
         table_pick = (table_pick + 1) % 2
         plpy.execute("TRUNCATE " + str(table_names[table_pick]))
 
@@ -2275,6 +2268,7 @@ def __fit_linear_model(
             """
             INSERT INTO {table1}
             SELECT pt.id,
+                   pt.node,
                    CASE WHEN (is_cont) 
                         THEN
                              CASE WHEN (gt.lmc_nid IS NULL) THEN 0
@@ -2310,17 +2304,247 @@ def __fit_linear_model(
                 tree_tbl_name = tree_tbl_name,
                 curr_level = curr_level))
 
-        plpy.info('Walk tree')
-
-        # Delete from the being classified data table
         plpy.execute(
             """
-            DELETE FROM {table_name}
-            WHERE node NOT IN
+            INSERT INTO {table1}
+            SELECT *
+            FROM {table2}
+            WHERE node  NOT IN
             (
                 SELECT id
                 FROM {tree_tbl_name}
             )
             """.format(
-                table_name = table_names[table_pick],
+                table1 = table_names[table_pick],
+                table2 = table_names[(table_pick + 1) % 2],
                 tree_tbl_name = tree_tbl_name))
+    
+    plpy.execute(
+        """
+        UPDATE {curr_table} l
+        SET node = l.parent,
+            parent = t.parent_id
+        FROM
+        {tree_tbl_name} t
+        WHERE l.parent = t.id
+        """.format(
+            curr_table = table_names[table_pick],
+            tree_tbl_name = tree_tbl_name
+            ))
+    __prune_model_tree( madlib_schema, tree_tbl_name, \
+                        enc_tbl_name, table_names[table_pick],
+                        verbosity) 
+
+def __prune_model_tree(
+        madlib_schema,
+        result_tree_tbl_name,
+        enc_tbl_name,
+        tr_tbl_name,
+        verbosity
+        ):
+    """
+    @brief  This function prunes the model tree.
+
+    @param  madlib_schema           The name of the madlib schema.
+    @param  result_tree_tbl_name    The name of the trained regression tree.
+    @param  enc_tbl_name            The name of the table with the encoded 
+                                    source data.
+    @param  tr_tbl_name             The name of the table, which stores the 
+                                    relation between the src data and the tree.
+    """
+    plpy.execute(
+        "ALTER TABLE "+tr_tbl_name+" ADD COLUMN curr_pred_error FLOAT8")
+    plpy.execute(
+        "ALTER TABLE "+tr_tbl_name+" ADD COLUMN parent_pred_error FLOAT8")
+    rt_prune_select = 'tmp_prune_select'
+    plpy.execute(
+        """
+        UPDATE {tr_tbl_name} t
+        SET curr_pred_error =                 
+                pow(
+                    n.predict_val-{madlib_schema}.svec_dot
+                        (
+                        m.coef_vals,
+                        {madlib_schema}.__get_selected_feature(n.fvals, m.fids)
+                        ),
+                    2
+                    )
+                *
+                    (
+                        (m.num_of_samples+array_upper(m.fids, 1))
+                        /
+                        (m.num_of_samples-array_upper(m.fids, 1))
+                    )
+        FROM {tree_table} m, {enc_tbl_name} n
+        WHERE t.node = m.id AND n.id = t.id
+        """.format(tr_tbl_name = tr_tbl_name,
+                   madlib_schema = madlib_schema,
+                   tree_table = result_tree_tbl_name,
+                   enc_tbl_name = enc_tbl_name))
+
+    plpy.execute(
+        """
+        UPDATE {tr_tbl_name} t
+        SET parent_pred_error = 
+                pow(
+                    n.predict_val-{madlib_schema}.svec_dot
+                        (
+                        m.coef_vals,
+                        {madlib_schema}.__get_selected_feature(n.fvals, m.fids)
+                        ),
+                    2
+                    )
+                *
+                    (
+                        (m.num_of_samples+array_upper(m.fids, 1))
+                        /
+                        (m.num_of_samples-array_upper(m.fids, 1))
+                    )
+        FROM {tree_table} m, {enc_tbl_name} n
+        WHERE t.parent = m.id AND n.id = t.id
+        """.format(tr_tbl_name = tr_tbl_name,
+                   madlib_schema = madlib_schema,
+                   tree_table = result_tree_tbl_name,
+                   enc_tbl_name = enc_tbl_name))
+
+    # Start pruning.
+    while True:
+        # Get the nodes which are possible to be pruned.
+        select_stmt = """    
+            SELECT a.*
+            FROM {result_tree_tbl_name} r, {tr_tbl_name} a
+            WHERE r.id IN
+            (
+                SELECT parent_id
+                FROM {result_tree_tbl_name}
+                WHERE parent_id NOT IN
+                (
+                    SELECT parent_id
+                    FROM {result_tree_tbl_name}
+                    WHERE lmc_nid IS NOT NULL
+                ) AND id <> 1
+            ) AND r.id = a.parent
+            """.format(
+                result_tree_tbl_name = result_tree_tbl_name,
+                tr_tbl_name = tr_tbl_name)
+
+ 
+        # Get the nodes that should be pruned, if there is no node, we break 
+        # the pruning process. 
+        plpy.execute("DROP TABLE IF EXISTS " + rt_prune_select)
+        begin_t = datetime.datetime.now()
+        plpy.execute(
+            """
+            CREATE TEMP TABLE {rt_prune_select} AS
+            SELECT parent, 
+                   parent_sum,
+                   leaf_sum
+            FROM
+            (
+                SELECT parent,
+                       SUM(parent_pred_error) AS parent_sum,
+                       SUM(curr_pred_error) AS leaf_sum
+                FROM ({select_stmt}) q
+                GROUP BY parent
+            ) t
+            WHERE parent_sum <= leaf_sum
+            """.format(
+                select_stmt = select_stmt,
+                rt_prune_select = rt_prune_select))
+        if verbosity > 0:
+            plpy.info(
+                ("select prune node time:" + 
+                 str(datetime.datetime.now() - begin_t)))
+
+        # If the number of the node that would be pruned is 0, the pruner 
+        # would stop.
+        prune_size = preproc.__size_of_table(madlib_schema, rt_prune_select)
+        if verbosity > 0:
+            plpy.info("prune node size: " + str(prune_size))
+        if prune_size == 0:
+            break
+        
+        # Update tr_tbl_name, which is used to assign the training data to
+        # tree node. If we prune the leaf node, then we should assign the data
+        # that belongs to the leaf to its parent.
+        begin_t = datetime.datetime.now()
+        plpy.execute(
+            """
+            UPDATE {tr_tbl_name} r
+            SET parent = t.parent_id,
+                node = t.id,
+                curr_pred_error = parent_pred_error
+            FROM {result_tree_tbl_name} t
+            WHERE t.id IN
+            (
+                SELECT parent 
+                FROM {rt_prune_select}
+            ) AND t.id = r.parent
+            """.format(
+                tr_tbl_name = tr_tbl_name,
+                result_tree_tbl_name = result_tree_tbl_name,
+                rt_prune_select = rt_prune_select))
+
+        plpy.execute(
+            """
+            UPDATE {tr_tbl_name} t
+            SET parent_pred_error = 
+                    pow(
+                        n.predict_val-{madlib_schema}.svec_dot
+                            (
+                            m.coef_vals,
+                            {madlib_schema}.__get_selected_feature(n.fvals, m.fids)
+                            ),
+                        2
+                        )
+                    *
+                        (
+                            (m.num_of_samples+array_upper(m.fids, 1))
+                            /
+                            (m.num_of_samples-array_upper(m.fids, 1))
+                        )
+            FROM {tree_table} m, {enc_tbl_name} n
+            WHERE t.parent = m.id AND n.id = t.id AND
+                  m.id IN
+                  (
+                    SELECT parent 
+                    FROM {rt_prune_select}
+                  )
+            """.format(tr_tbl_name = tr_tbl_name,
+                       madlib_schema = madlib_schema,
+                       tree_table = result_tree_tbl_name,
+                       enc_tbl_name = enc_tbl_name,
+                       rt_prune_select = rt_prune_select))
+        if verbosity > 0:
+            plpy.info(
+                ("update tr_tbl_name time:" + 
+                 str(datetime.datetime.now() - begin_t)))
+
+        # Delete the pruned nodes.
+        plpy.execute(
+            """
+            DELETE FROM {result_tree_tbl_name}
+            WHERE parent_id IN
+            (
+                SELECT parent from {rt_prune_select}
+            )
+            """.format(
+                result_tree_tbl_name = result_tree_tbl_name,
+                rt_prune_select = rt_prune_select))
+        
+        # Update the trained tree, set lmc_nid, lmc_fval to null, which means
+        # that the parent of pruned leaf become new leaf.
+        plpy.execute(
+            """
+            UPDATE {result_tree_tbl_name} 
+            SET lmc_nid = NULL,
+                lmc_fval = NULL
+            WHERE id IN
+            (
+                SELECT parent 
+                FROM {rt_prune_select}
+            )
+            """.format(
+                result_tree_tbl_name = result_tree_tbl_name,
+                rt_prune_select = rt_prune_select))
+
