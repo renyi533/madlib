@@ -444,6 +444,17 @@ $$ LANGUAGE PLPYTHONU;
  * @param result_tree_table_name    Specify the trained regression tree table.
  * @param scoring_table_name        Specify the table which is used to check the
  *                                  accuracy of the regression tree.
+ * @param smoothing_factor          The smoothed predicted value is backed up from the
+ *                                  leaf to the root as follows:
+ *                                    1) The predicted value at the leaf is the value 
+ *                                       computed by the model at this leaf.
+ *                                    2) If the sample follows branch Si of subtree S, let
+ *                                       Ni be the number of training samples at Si, PV(Si)
+ *                                       the predicted value at Si, and M(S) the value given
+ *                                       by the model at S. The predicted value backed up to 
+ *                                       S will be:
+ *                                          PV(S) = (Ni*PV(Si)+k*M(S))/(Ni+k)
+ *                                       where k is the smoothing factor specified here.
  * @param verbosity                 > 0 means the algorithm run in a verbose mode.
  *
  * @return The float value of root relative squared error.
@@ -452,11 +463,13 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.rt_score
     (
     result_tree_table_name      TEXT,
     scoring_table_name          TEXT,
+    smoothing_factor            INT,
     verbosity                   INT
     )
 RETURNS FLOAT8 AS $$
     PythonFunctionBodyOnly(`cart', `rt')
-    return rt.score(schema_madlib, result_tree_table_name,scoring_table_name, verbosity)
+    return rt.score(schema_madlib, result_tree_table_name,scoring_table_name, \
+                    smoothing_factor, verbosity)
 $$ LANGUAGE PLPYTHONU;
 
 
@@ -580,6 +593,17 @@ CREATE TYPE MADLIB_SCHEMA.rt_predict_result AS
  *                                  to be predicted.
  * @param result_table_name         The name of the table that stores the prediction 
  *                                  result.
+ * @param smoothing_factor          The smoothed predicted value is backed up from the
+ *                                  leaf to the root as follows:
+ *                                    1) The predicted value at the leaf is the value 
+ *                                       computed by the model at this leaf.
+ *                                    2) If the sample follows branch Si of subtree S, let
+ *                                       Ni be the number of training samples at Si, PV(Si)
+ *                                       the predicted value at Si, and M(S) the value given
+ *                                       by the model at S. The predicted value backed up to 
+ *                                       S will be:
+ *                                          PV(S) = (Ni*PV(Si)+k*M(S))/(Ni+k)
+ *                                       where k is the smoothing factor specified here.
  * @param verbosity                 > 0 means this function runs in verbose mode.
  *
  * @return A specified table by user that stores the prediction result. 
@@ -589,12 +613,13 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.rt_predict
     rt_table_name           TEXT,
     prediction_table_name   TEXT,
     result_table_name       TEXT,
+    smoothing_factor        INT,
     verbosity               INT
     )
 RETURNS MADLIB_SCHEMA.rt_predict_result AS $$
     PythonFunctionBodyOnly(`cart', `rt')
     return rt.predict(schema_madlib, rt_table_name, prediction_table_name, 
-        result_table_name, verbosity)
+        result_table_name, smoothing_factor, verbosity)
 $$ LANGUAGE PLPYTHONU;
 
 

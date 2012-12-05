@@ -1052,6 +1052,7 @@ def predict(
         tree_tbl_name,
         prediction_tbl_name,
         result_tbl_name,
+        smoothing_factor,
         verbosity):
     """
     @brief Predict dataset using trained decision tree model.
@@ -1063,6 +1064,17 @@ def predict(
                                 to be predicted.
     @param result_tbl_name      The name of the table that stores the prediction 
                                 result.
+    @param smoothing_factor     The smoothed predicted value is backed up from the
+                                leaf to the root as follows:
+                                1) The predicted value at the leaf is the value 
+                                   computed by the model at this leaf.
+                                2) If the sample follows branch Si of subtree S, let
+                                   Ni be the number of training samples at Si, PV(Si)
+                                   the predicted value at Si, and M(S) the value given
+                                   by the model at S. The predicted value backed up to 
+                                   S will be:
+                                      PV(S) = (Ni*PV(Si)+k*M(S))/(Ni+k)
+                                   where k is the smoothing factor specified here.
     @param verbosity            > 0 means this function runs in verbose mode. 
     """
     begin_predict_time = datetime.datetime.now()
@@ -1158,7 +1170,8 @@ def predict(
             id              BIGINT,
             predict_val     FLOAT8,
             parent_id       INT,
-            leaf_id         INT
+            leaf_id         INT,
+            num_of_samples  BIGINT
         )
         m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (id)');
         """.format(
@@ -1245,7 +1258,7 @@ def predict(
             (
                 SELECT t1.id, t1.jump, fvals
                 FROM {table2} t1
-                LEFT JOIN {enc_tbl_name} t2 ON t1.id = t2.id
+                INNER JOIN {enc_tbl_name} t2 ON t1.id = t2.id
             ) AS pt,
             (
                 SELECT lmc_nid, lmc_fval, predict_val, parent_id, id, is_cont,
@@ -1269,15 +1282,16 @@ def predict(
             """
             INSERT INTO {result_tbl_name}
             (
-                id, predict_val, parent_id, leaf_id
+                id, predict_val, parent_id, leaf_id, num_of_samples
             )
-            SELECT id, predict_val, parent_id, leaf_id
-            FROM {table_name}
+            SELECT t1.id, t1.predict_val, t1.parent_id, t1.leaf_id, 
+                   t2.num_of_samples
+            FROM {table_name} t1, {tree_tbl_name} t2
             WHERE jump NOT IN
             (
                 SELECT id
                 FROM {tree_tbl_name}
-            )
+            ) AND t1.leaf_id = t2.id
             """.format(
                 result_tbl_name = result_tbl_name,
                 table_name = table_names[table_pick],
@@ -1314,7 +1328,49 @@ def predict(
         """.format(
             result_tbl_name = result_tbl_name,
             table_name = table_names[(table_pick + 1) % 2]))
-    
+
+    if smoothing_factor <= 0:
+        ret.prediction_time = datetime.datetime.now() - begin_predict_time    
+        return ret
+
+    curr_level = max_level
+
+    while curr_level > 1:
+        plpy.execute(
+            """
+            UPDATE {result_tbl_name} t1
+            SET 
+                parent_id = gt.parent_id,
+                leaf_id = gt.id,
+                predict_val = 
+                    (t1.predict_val * t1.num_of_samples
+                        +
+                    {smoothing_factor}*
+                    {madlib_schema}.svec_dot
+                        (
+                        gt.coef_vals,
+                        {madlib_schema}.__get_selected_feature(pt.fvals, gt.fids)
+                        )
+                    )/({smoothing_factor}+t1.num_of_samples),
+                num_of_samples = gt.num_of_samples
+            FROM
+            {enc_tbl_name} pt,
+            (
+                SELECT lmc_nid, lmc_fval, predict_val, parent_id, id, is_cont,
+                       split_value, feature, coef_vals, fids, num_of_samples
+                FROM {tree_tbl_name}
+            ) AS gt
+            WHERE t1.parent_id = gt.id AND t1.id = pt.id
+            """.format(
+                result_tbl_name = result_tbl_name,
+                enc_tbl_name = enc_tbl_name,
+                tree_tbl_name = tree_tbl_name,
+                curr_level = curr_level,
+                madlib_schema = madlib_schema,
+                smoothing_factor = smoothing_factor))
+
+        curr_level = curr_level-1
+
     # Record the prediction time.
     ret.prediction_time = datetime.datetime.now() - begin_predict_time
     
@@ -1364,6 +1420,7 @@ def __rep_prune_tree(
         result_tree_tbl_name,
         validation_tbl_name,
         predict_result,
+        0,
         verbosity)
     if verbosity > 0:
         plpy.info(
@@ -1914,7 +1971,7 @@ def __create_tree_table(madlib_schema, result_tree_tbl_name):
             split_value     FLOAT8,
             variance_gain   FLOAT8,
             live            INT,
-            num_of_samples  INT,
+            num_of_samples  BIGINT,
             parent_id       INT,
             lmc_nid         INT,
             lmc_fval        FLOAT8,
@@ -2033,6 +2090,7 @@ def score(
         madlib_schema,
         tree_tbl_name,
         scoring_tbl_name,
+        smoothing_factor,
         verbosity):
     """
     @brief This function check the accuracy of the trained regression tree 
@@ -2052,6 +2110,17 @@ def score(
     @param tree_tbl_name    Specify the trained regression tree table.
     @param scoring_tbl_name Specify the table which is used to check the
                             accuracy of the regression tree.
+    @param smoothing_factor The smoothed predicted value is backed up from the
+                            leaf to the root as follows:
+                            1) The predicted value at the leaf is the value 
+                               computed by the model at this leaf.
+                            2) If the sample follows branch Si of subtree S, let
+                               Ni be the number of training samples at Si, PV(Si)
+                               the predicted value at Si, and M(S) the value given
+                               by the model at S. The predicted value backed up to 
+                               S will be:
+                                  PV(S) = (Ni*PV(Si)+k*M(S))/(Ni+k)
+                               where k is the smoothing factor specified here.
     @param verbosity        > 0 means the algorithm run in a verbose mode. 
     """
     # Initial params.
@@ -2087,6 +2156,7 @@ def score(
         tree_tbl_name,
         scoring_tbl_name,
         result_tbl_name,
+        smoothing_factor,
         verbosity)
     
     # Caculate the root relative square error.
