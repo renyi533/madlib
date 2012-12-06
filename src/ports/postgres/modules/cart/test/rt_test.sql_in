@@ -77,7 +77,7 @@ BEGIN
         RAISE EXCEPTION 'Install check failed.';
     END IF;
     
-	score_accuracy = MADLIB_SCHEMA.rt_score(result_tree_table_name, scoring_table_name, 0);
+	score_accuracy = MADLIB_SCHEMA.rt_score(result_tree_table_name, scoring_table_name,0, 0);
     RAISE INFO 'Score:%',score_accuracy;
     
     display = MADLIB_SCHEMA.rt_display(result_tree_table_name);
