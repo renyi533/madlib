@@ -2518,6 +2518,7 @@ def __prune_model_tree(
                 GROUP BY parent
             ) t
             WHERE parent_sum <= leaf_sum
+            m4_ifdef(`__GREENPLUM__', `DISTRIBUTED BY (parent)');
             """.format(
                 select_stmt = select_stmt,
                 rt_prune_select = rt_prune_select))

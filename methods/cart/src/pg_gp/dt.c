@@ -28,7 +28,7 @@
 #ifndef NO_PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
 #endif
-#define __DT_SHOW_DEBUG_INFO__
+/*#define __DT_SHOW_DEBUG_INFO__*/
 #ifdef __DT_SHOW_DEBUG_INFO__
 #define dtelog(...) elog(__VA_ARGS__)
 #else

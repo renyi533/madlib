@@ -42,13 +42,13 @@ m4_ifelse(
 
 @about
 
-This module provides an implementation to grow regression trees.
+This module provides an implementation to grow regression trees. Actually, it 
+includes two algorithms. One is the classical regression tree algorithm proposed
+in the paper of CART. Another is model tree, which combines the power of linear 
+model with classical regression trees.
 
 The implementation supports:
-- Building regression tree
-- Multiple split critera, including:
-  . const_value
-  . model(support in future)
+- Building regression tree, const value or linear model
 - Regression tree Pruning
 - Regression tree prediction/scoring
 - Regression tree display
@@ -112,6 +112,7 @@ that it does not need a predict_val column.
     '<em>rt_table_name</em>', 
     '<em>prediction_table_name</em>', 
     '<em>result_table_name</em>'
+    '<em>smoothing_factor</em>'
     '<em>verbosity</em>');</pre>
   This will create the result_table with the prediction results. 
   <pre> </pre> 
@@ -120,6 +121,7 @@ that it does not need a predict_val column.
   <pre>SELECT * FROM \ref rt_score(
     '<em>tree_table_name</em>',
     '<em>validation_table_name</em>',
+    '<em>smoothing_factor</em>'
 	'<em>verbosity</em>');</pre>
   This will give a root relative squared error value.
   <pre> </pre>
@@ -128,6 +130,7 @@ that it does not need a predict_val column.
   <pre>SELECT * FROM \ref rt_display(
     '<em>tree_table_name</em>');</pre>
   This will display the trained regression tree in human readable format. 
+  The display function just support const value regression trees.
   <pre> </pre> 
 
 - Run the clean tree function as below: 
@@ -195,7 +198,7 @@ sql> select * from golf_data_rt order by id;
  (14 rows)
 \endverbatim
 
--# Train the regression tree model, e.g.:
+-# Train the const value regression tree model, e.g.:
 \verbatim
 sql> SELECT * FROM MADLIB_SCHEMA.rt_clean('trained_tree_rt');
 sql> SELECT * FROM MADLIB_SCHEMA.rt_train(
@@ -211,7 +214,7 @@ sql> SELECT * FROM MADLIB_SCHEMA.rt_train(
 	   'explicit',                       		-- missing value preparation
 	   5,                                		-- max tree depth
 	   0.001,                            		-- min percent node
-	   0.001,                            		-- min percent split
+	   0.01,                            		-- min percent split
 	   0);                               		-- verbosity
   num_of_samples | tree_nodes | tree_depth | training_time  
  ----------------+------------+------------+----------------
@@ -222,16 +225,16 @@ sql> SELECT * FROM MADLIB_SCHEMA.rt_train(
 -# Check few rows from the tree model table:
 \verbatim
 sql> select * from trained_tree_rt order by id;
- id | tree_location | fids | coef_vals | feature | is_cont | split_value |    variance_gain     | live | num_of_samples | parent_id | lmc_nid | lmc_fval |    predict_val     
-----+---------------+------+-----------+---------+---------+-------------+----------------------+------+----------------+-----------+---------+----------+--------------------
-  1 | {0}           | {0}  | {0}       |       2 | f       |             |     1.75117142857143 |    0 |             14 |         0 |       2 |        1 |  0.612142857142857
-  2 | {0,1}         | {0}  | {0}       |       3 | t       |          81 |  0.00492500000000037 |    0 |              4 |         1 |         |          |             0.9125
-  3 | {0,2}         | {0}  | {0}       |       4 | f       |             |              0.84276 |    0 |              5 |         1 |       5 |        1 |              0.602
-  4 | {0,3}         | {0}  | {0}       |       1 | t       |          70 |              0.89568 |    0 |              5 |         1 |       7 |        1 |              0.382
-  5 | {0,2,1}       | {0}  | {0}       |       3 | t       |          70 |   0.0020333333333337 |    0 |              3 |         3 |         |          |  0.936666666666667
-  6 | {0,2,2}       | {0}  | {0}       |       1 | t       |          70 |               0.0032 |    0 |              2 |         3 |         |          |                0.1
-  7 | {0,3,1}       | {0}  | {0}       |       3 | t       |          69 | 0.000199999999999978 |    0 |              2 |         4 |         |          |                0.9
-  8 | {0,3,2}       | {0}  | {0}       |       3 | t       |          72 |  0.00283333333333333 |    0 |              3 |         4 |         |          | 0.0366666666666667
+ id | tree_location | fids |      coef_vals       | feature | is_cont | split_value |    variance_gain     | live | num_of_samples | parent_id | lmc_nid | lmc_fval |    predict_val     
+----+---------------+------+----------------------+---------+---------+-------------+----------------------+------+----------------+-----------+---------+----------+--------------------
+  1 | {0}           | {0}  | {0.612142857142857}  |       2 | f       |             |     1.75117142857143 |    0 |             14 |         0 |       2 |        1 |  0.612142857142857
+  2 | {0,1}         | {0}  | {0.9125}             |       3 | t       |          81 |  0.00492500000000037 |    0 |              4 |         1 |         |          |             0.9125
+  3 | {0,2}         | {0}  | {0.602}              |       4 | f       |             |              0.84276 |    0 |              5 |         1 |       5 |        1 |              0.602
+  4 | {0,3}         | {0}  | {0.382}              |       1 | t       |          70 |              0.89568 |    0 |              5 |         1 |       7 |        1 |              0.382
+  5 | {0,2,1}       | {0}  | {0.936666666666667}  |       3 | t       |          70 |   0.0020333333333337 |    0 |              3 |         3 |         |          |  0.936666666666667
+  6 | {0,2,2}       | {0}  | {0.1}                |       1 | t       |          70 |               0.0032 |    0 |              2 |         3 |         |          |                0.1
+  7 | {0,3,1}       | {0}  | {0.9}                |       3 | t       |          69 | 0.000199999999999978 |    0 |              2 |         4 |         |          |                0.9
+  8 | {0,3,2}       | {0}  | {0.0366666666666667} |       3 | t       |          72 |  0.00283333333333333 |    0 |              3 |         4 |         |          | 0.0366666666666667
 (8 rows)
 \endverbatim
 
@@ -256,6 +259,7 @@ Root Node : predict_value(0.612142857143)  num_elements(14)
 sql> select * from MADLIB_SCHEMA.rt_predict(
          'trained_tree_rt',         -- name of the trained model
          'golf_data_rt',            -- name of the table containing data to predict
+         0,                         -- smoothing factor. We turn off smoothing with 0.
          'prediction_result');      -- name of the output table
  input_set_size |    prediction_time    
 ----------------+-----------------
@@ -291,6 +295,7 @@ sql> select t.id,t.outlook,t.temperature,t.humidity,t.windy,t.predict_val as rea
 sql> select * from MADLIB_SCHEMA.rt_score(
         'trained_tree_rt',
         'golf_data_rt',
+        0,
         0);
     rt_score     
 -----------------
@@ -308,9 +313,57 @@ sql> select MADLIB_SCHEMA.rt_clean('trained_tree_rt');
 (1 row)
 \endverbatim
 
+-# Train the linear regression tree model, e.g.:
+\verbatim
+sql> SELECT * FROM MADLIB_SCHEMA.rt_clean('trained_tree_rt');
+sql> SELECT * FROM MADLIB_SCHEMA.rt_train(
+	   'model',                       	        -- regression tree type
+	   'golf_data_rt',                     		-- input table name
+	   'trained_tree_rt',                 		-- result tree name
+	   null,                             		-- validation table name
+	   'temperature,humidity',           		-- continuous feature names
+	   'outlook,temperature,humidity,windy',	-- feature column names
+	   'id',                             		-- id column name
+	   'predict_val',                     		-- predict value column name
+	   0.01,                              		-- min variance gain
+	   'explicit',                       		-- missing value preparation
+	   5,                                		-- max tree depth
+	   0.001,                            		-- min percent node
+	   0.01,                            		-- min percent split
+	   0);                               		-- verbosity
+  num_of_samples | tree_nodes | tree_depth | training_time  
+ ----------------+------------+------------+----------------
+              14 |          6 |          3 | 00:00:01.53514
+(1 row)
+\endverbatim
+
+-# Check few rows from the tree model table:
+\verbatim
+sql> select * from trained_tree_rt order by id;
+ id | tree_location |   fids    |                                  coef_vals                                   | feature | is_cont | split_value |  variance_gain   | live | num_of_samples | parent_id | lmc_nid | lmc_fval |    predict_val     
+----+---------------+-----------+------------------------------------------------------------------------------+---------+---------+-------------+------------------+------+----------------+-----------+---------+----------+--------------------
+  1 | {0}           | {0,1,4,2} | {2.55737059462817,-0.0122925011644191,-0.310565750659615,-0.248451793199823} |       2 | f       |             | 1.75117142857143 |    0 |             14 |         0 |       2 |        1 |  0.612142857142857
+  2 | {0,1}         | {0}       | {0.9125}                                                                     |       0 | t       |          81 |                0 |    0 |              4 |         1 |         |          |             0.9125
+  3 | {0,2}         | {0,4}     | {1.77333333333333,-0.836666666666666}                                        |       4 | f       |             |          0.84276 |    0 |              5 |         1 |         |          |              0.602
+  4 | {0,3}         | {0,1}     | {3.53358490566045,-0.0384339622641518}                                       |       1 | t       |          70 |          0.89568 |    0 |              5 |         1 |       7 |        1 |              0.382
+  7 | {0,3,1}       | {0}       | {0.9}                                                                        |       0 | t       |          69 |                0 |    0 |              2 |         4 |         |          |                0.9
+  8 | {0,3,2}       | {0}       | {0.0366666666666667}                                                         |       0 | t       |          72 |                0 |    0 |              3 |         4 |         |          | 0.0366666666666667
+(6 rows)
+\endverbatim
+
 @literature
 
 http://en.wiktionary.org/wiki/regression_tree
+
+L. Breiman, J. H. Friedman, R. A. Olshen, and C. J. Stone. Classification and Regression Trees. Wadsworth, Belmont, 1984.
+
+J. R. Quinlan. Learning with Continuous Classes. In 5th Australian Joint Conference on Artificial Intelligence, pages 343–348, 1992.
+
+A. Karalic. Linear regression in regression tree leaves. In International School for Synthesis of Expert Knowledge, Bled,Slovenia, 1992.
+
+W. P. Alexander and S. D. Grimshaw. Treed regression. Journal of Computational and Graphical Statistics, (5):156–175, 1996.
+
+L. Torgo. Kernel regression trees. In European Conference on Machine Learning, 1997. Poster paper.
 
 @sa File rt.sql_in documenting the SQL functions.
 */
