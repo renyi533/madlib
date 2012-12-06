@@ -770,7 +770,8 @@ def __generate_final_tree(
         WHERE lmc_nid IS NULL
         """.format(result_tree_tbl_name = result_tree_tbl_name,
                    level = max_level))
-
+    
+    plpy.execute('DROP TABLE IF EXISTS temp_parent_track')
     plpy.execute(
         """
         CREATE TEMP TABLE temp_parent_track
