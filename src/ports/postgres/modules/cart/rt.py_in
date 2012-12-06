@@ -2444,7 +2444,11 @@ def __prune_model_tree(
                     (
                         (m.num_of_samples+array_upper(m.fids, 1))
                         /
-                        (m.num_of_samples-array_upper(m.fids, 1))
+                        CASE WHEN((m.num_of_samples-array_upper(m.fids, 1))>0) THEN
+                            (m.num_of_samples-array_upper(m.fids, 1))
+                        ELSE
+                            1
+                        END
                     )
         FROM {tree_table} m, {enc_tbl_name} n
         WHERE t.node = m.id AND n.id = t.id
@@ -2469,7 +2473,11 @@ def __prune_model_tree(
                     (
                         (m.num_of_samples+array_upper(m.fids, 1))
                         /
-                        (m.num_of_samples-array_upper(m.fids, 1))
+                        CASE WHEN((m.num_of_samples-array_upper(m.fids, 1))>0) THEN
+                            (m.num_of_samples-array_upper(m.fids, 1))
+                        ELSE
+                            1
+                        END
                     )
         FROM {tree_table} m, {enc_tbl_name} n
         WHERE t.parent = m.id AND n.id = t.id
@@ -2573,7 +2581,11 @@ def __prune_model_tree(
                         (
                             (m.num_of_samples+array_upper(m.fids, 1))
                             /
-                            (m.num_of_samples-array_upper(m.fids, 1))
+                            CASE WHEN((m.num_of_samples-array_upper(m.fids, 1))>0) THEN
+                                (m.num_of_samples-array_upper(m.fids, 1))
+                            ELSE
+                                1
+                            END
                         )
             FROM {tree_table} m, {enc_tbl_name} n
             WHERE t.parent = m.id AND n.id = t.id AND
