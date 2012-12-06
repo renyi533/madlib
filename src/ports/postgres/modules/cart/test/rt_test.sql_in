@@ -95,3 +95,9 @@ SELECT MADLIB_SCHEMA.rt_test('const_value','golf_rt_test','trained_tree_rt','gol
     'predict_val',0.01,'ignore',10,0.001,0.01,'golf_rt_test','');
 SELECT MADLIB_SCHEMA.rt_test('const_value','golf_rt_test','trained_tree_rt','golf_rt_test','temperature,humidity','temperature,humidity,outlook,windy','id','predict_val',0.01,'ignore',10,0.001,0.01,'golf_rt_test','');
 
+SELECT MADLIB_SCHEMA.rt_test('model','golf_rt_test','trained_tree_rt',NULL,'temperature,humidity',NULL,'id',
+    'predict_val',0.01,'ignore',10,0.001,0.01,'golf_rt_test','');
+SELECT MADLIB_SCHEMA.rt_test('model','golf_rt_test','trained_tree_rt','golf_rt_test','temperature,humidity',NULL,'id',
+    'predict_val',0.01,'ignore',10,0.001,0.01,'golf_rt_test','');
+SELECT MADLIB_SCHEMA.rt_test('model','golf_rt_test','trained_tree_rt','golf_rt_test','temperature,humidity','temperature,humidity,outlook,windy','id','predict_val',0.01,'ignore',10,0.001,0.01,'golf_rt_test','');
+
