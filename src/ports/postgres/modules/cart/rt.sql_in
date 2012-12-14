@@ -708,5 +708,7 @@ CREATE OR REPLACE FUNCTION MADLIB_SCHEMA.__get_selected_feature
     fids   INT[]
     )
 RETURNS FLOAT8[] 
-AS 'MODULE_PATHNAME', 'get_selected_feature'
-LANGUAGE C STRICT IMMUTABLE;
+LANGUAGE c
+IMMUTABLE
+STRICT
+AS 'MODULE_PATHNAME', 'get_selected_feature';

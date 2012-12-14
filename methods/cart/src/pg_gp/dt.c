@@ -2790,7 +2790,7 @@ PG_FUNCTION_INFO_V1(dt_array_indexed_agg_ffunc);
  * 
  * @return The vector containing the values of selected features.
  */
-Datum get_selected_feature(PG_FUNCTION_ARGS)
+/*Datum get_selected_feature(PG_FUNCTION_ARGS)
 {
 	ArrayType       * fvals;
     ArrayType       * fids;
@@ -2853,4 +2853,4 @@ Datum get_selected_feature(PG_FUNCTION_ARGS)
     PG_RETURN_ARRAYTYPE_P(state);
 }
 PG_FUNCTION_INFO_V1(get_selected_feature);
-
+*/
