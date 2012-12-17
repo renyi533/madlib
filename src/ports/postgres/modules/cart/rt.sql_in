@@ -67,7 +67,7 @@ the following form:
     <em>feature3</em> SUPPORTED_DATA_TYPE,
     ....................
     <em>featureN</em> SUPPORTED_DATA_TYPE,
-    <em>predict_val</em> SUPPORTED_DATA_TYPE,
+    <em>predict_val</em> FLOAT8,
     ...
 )</pre>
 
@@ -141,43 +141,10 @@ that it does not need a predict_val column.
 
 @examp
 
-The regression example data comes from a well-known dataset called golf_data
-which is commonly used in classification. We transform the class label from 
-discrete label to continuous value by the following sql:
+The regression example data comes from a well-known dataset called golf_data.
+The 'predict_val' means the probability of playing golf under certain conditions.
 -# Prepare an input table/view, e.g.:
 \verbatim
-sql> create table golf_data_rt as
-     select id, outlook, temperature, humidity, windy, 
-            case when(class like '%Do not%') 
-                 then 0+id/100.0 
-                 else 1-id/100.0 
-            end as predict_val 
-     from golf_data;
-sql> select * from golf_data order by id;
- id | outlook  | temperature | humidity | windy  |    class     
-----+----------+-------------+----------+--------+--------------
-  1 | sunny    |          85 |       85 |  false |  Do not Play
-  2 | sunny    |          80 |       90 |  true  |  Do not Play
-  3 | overcast |          83 |       78 |  false |  Play
-  4 | rain     |          70 |       96 |  false |  Play
-  5 | rain     |          68 |       80 |  false |  Play
-  6 | rain     |          65 |       70 |  true  |  Do not Play
-  7 | overcast |          64 |       65 |  true  |  Play
-  8 | sunny    |          72 |       95 |  false |  Do not Play
-  9 | sunny    |          69 |       70 |  false |  Play
- 10 | rain     |          75 |       80 |  false |  Play
- 11 | sunny    |          75 |       70 |  true  |  Play
- 12 | overcast |          72 |       90 |  true  |  Play
- 13 | overcast |          81 |       75 |  false |  Play
- 14 | rain     |          71 |       80 |  true  |  Do not Play
-(14 rows)
-sql> create table golf_data_rt as
-     select id, outlook, temperature, humidity, windy,
-            case when(class like '%Do not%')
-                 then 0+id/100.0
-                 else 1-id/100.0
-            end as predict_val
-     from golf_data;
 sql> select * from golf_data_rt order by id;
  id | outlook  | temperature | humidity | windy  |      predict_val       
 ----+----------+-------------+----------+--------+------------------------
